@@ -438,7 +438,7 @@ process align_reads {
 
     // Resource requirements
     cpus 8
-    memory { 50.GB }
+    memory { 20.GB }
     time { 5.hours }
 
     input:
