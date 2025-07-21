@@ -54,8 +54,14 @@ def helpMessage() {
       - type: One of 'single', 'paired', 'technical_replicate' (required)
       - group: Group identifier for the sample (optional)
 
-      For technical replicates, additional columns (fastq_3, fastq_4, etc.) can
-      be added to define more files to concatenate.
+      For technical replicates:
+      - Single-end: List all technical replicate files in fastq_1, fastq_2, fastq_3, etc.
+      - Paired-end: List R1 files in fastq_1, fastq_3, fastq_5, etc. and R2 files in fastq_2, fastq_4, fastq_6, etc.
+                   OR ensure filenames contain R1/R2 or _1/_2 identifiers for automatic detection
+
+    Example for paired-end technical replicates:
+      sample,fastq_1,fastq_2,fastq_3,fastq_4,type,group
+      sample1,sample1_rep1_R1.fastq.gz,sample1_rep1_R2.fastq.gz,sample1_rep2_R1.fastq.gz,sample1_rep2_R2.fastq.gz,technical_replicate,treatment
 
     Optional Arguments:
       --outdir              Output directory (default: ${params.outdir})
@@ -162,17 +168,74 @@ process concatenate_technical_replicates {
     tuple val(sample_id), val(sample_type), path(fastq_files), val(group)
 
     output:
-    tuple val(sample_id), val('single'), path("${sample_id}.fastq.gz"), val(group), emit: sample_data
+    tuple val(sample_id), val(output_type), path("${sample_id}*.fastq.gz"), val(group), emit: sample_data
 
     when:
     sample_type == 'technical_replicate'
 
     script:
-    """
-    echo "Concatenating ${fastq_files.size()} technical replicate files for sample ${sample_id}..."
-    cat ${fastq_files.join(' ')} > ${sample_id}.fastq.gz
-    echo "✓ Created merged file for ${sample_id}"
-    """
+    // Determine if we have paired-end technical replicates
+    def file_count = fastq_files.size()
+    def is_paired = (file_count % 2 == 0) && file_count > 1
+
+    if (is_paired) {
+        // For paired-end technical replicates
+        output_type = 'paired'
+        """
+        echo "Concatenating ${file_count} technical replicate files for paired-end sample ${sample_id}..."
+
+        # Sort files to ensure proper R1/R2 pairing
+        # Assuming files follow naming convention with R1/R2 or _1/_2
+        R1_files=()
+        R2_files=()
+
+        for file in ${fastq_files.join(' ')}; do
+            if [[ \$file == *"R1"* ]] || [[ \$file == *"_1"* ]]; then
+                R1_files+=("\$file")
+            elif [[ \$file == *"R2"* ]] || [[ \$file == *"_2"* ]]; then
+                R2_files+=("\$file")
+            else
+                echo "Warning: Cannot determine if \$file is R1 or R2 based on filename"
+                # Fallback: assume first half are R1, second half are R2
+                file_index=\$(printf '%s\n' ${fastq_files.join(' ')} | grep -n "^\$file\$" | cut -d: -f1)
+                if [ \$file_index -le \$((file_count / 2)) ]; then
+                    R1_files+=("\$file")
+                else
+                    R2_files+=("\$file")
+                fi
+            fi
+        done
+
+        echo "R1 files: \${R1_files[@]}"
+        echo "R2 files: \${R2_files[@]}"
+
+        # Concatenate R1 files
+        if [ \${#R1_files[@]} -gt 0 ]; then
+            cat \${R1_files[@]} > ${sample_id}_R1.fastq.gz
+            echo "✓ Created merged R1 file for ${sample_id}"
+        fi
+
+        # Concatenate R2 files
+        if [ \${#R2_files[@]} -gt 0 ]; then
+            cat \${R2_files[@]} > ${sample_id}_R2.fastq.gz
+            echo "✓ Created merged R2 file for ${sample_id}"
+        fi
+
+        # Verify we have both R1 and R2
+        if [ ! -f "${sample_id}_R1.fastq.gz" ] || [ ! -f "${sample_id}_R2.fastq.gz" ]; then
+            echo "ERROR: Failed to create both R1 and R2 files"
+            exit 1
+        fi
+        """
+    } else {
+        // For single-end technical replicates
+        output_type = 'single'
+        """
+        echo "Concatenating ${file_count} technical replicate files for single-end sample ${sample_id}..."
+        cat ${fastq_files.join(' ')} > ${sample_id}.fastq.gz
+        echo "✓ Created merged file for ${sample_id}"
+        """
+    }
 }
 
 // Process to handle paired-end reads
@@ -651,7 +714,7 @@ process combine_results {
                 # Copy files with explicit error handling for each type
                 for pattern in "*.eej*" "*.exskX" "*.info" "*.IR*" "*.mic*" "*.MULTI*" "*.tab"; do
                     echo "Copying \$pattern files from \$dir/to_combine/"
-                    find "\$dir/to_combine" -type f -name "\$pattern" -exec cp {} to_combine/ \\; 2>/dev/null || true
+                    find "\$dir/to/combine" -type f -name "\$pattern" -exec cp {} to_combine/ \\; 2>/dev/null || true
                 done
             else
                 echo "No to_combine directory in \$dir, searching for files directly"
