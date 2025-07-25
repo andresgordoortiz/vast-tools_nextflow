@@ -613,9 +613,10 @@ process combine_results {
         }
     }
 
-    cpus 4
+    // Increase resources to handle larger datasets
+    cpus 8
     memory { 64.GB }
-    time { 4.hour }
+    time { 6.hours }  // Increase time limit to 6 hours
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -694,14 +695,32 @@ process combine_results {
             export PERL5OPT=""  # Clear potentially problematic Perl options
             export PERL_HASH_SEED=0
 
-            # Run with explicit timeout and process monitoring
+            # Run with much longer timeout (24 hours) and periodic progress monitoring
             echo "Starting vast-tools combine (Singularity mode)..."
-            timeout 3600 vast-tools combine to_combine/ -sp ${params.species} -o . --verbose > combine.log 2>&1
+
+            # Start progress monitoring in background
+            (
+                while true; do
+                    echo "\$(date): Combine operation in progress... Files: \$(find to_combine -type f | wc -l)"
+                    if [ -d "tmp" ]; then
+                        echo "Temp directory size: \$(du -sh tmp 2>/dev/null || echo 'N/A')"
+                    fi
+                    echo "Memory usage: \$(free -h 2>/dev/null || echo 'N/A')"
+                    sleep 900  # Check every 15 minutes
+                done
+            ) > combine_progress.log 2>&1 &
+            PROGRESS_PID=\$!
+
+            # Use a much longer timeout (86400 seconds = 24 hours)
+            timeout 86400 vast-tools combine to_combine/ -sp ${params.species} -o . --verbose > combine.log 2>&1
             combine_exit_code=\$?
+
+            # Kill the progress monitor
+            kill \$PROGRESS_PID 2>/dev/null || true
         else
             echo "Running in Docker container"
-            # Docker execution (original approach)
-            timeout -k 100m 90m bash -c "vast-tools combine to_combine/ -sp ${params.species} -o . --verbose" 2> combine_error.log
+            # Docker execution with longer timeout
+            timeout -k 2h 24h bash -c "vast-tools combine to_combine/ -sp ${params.species} -o . --verbose" 2> combine_error.log
             combine_exit_code=\$?
         fi
 
@@ -729,16 +748,22 @@ process combine_results {
             echo "Working directory: \$(pwd)"
             echo "Files in to_combine: \$(ls -la to_combine/ | wc -l)"
             echo "Available memory: \$(cat /proc/meminfo | grep MemAvailable || echo 'N/A')"
+            echo "Disk space: \$(df -h . || echo 'N/A')"
 
             # Check logs
             if [ -f "combine.log" ]; then
                 echo "=== COMBINE LOG ==="
-                tail -50 combine.log
+                tail -100 combine.log
             fi
 
             if [ -f "combine_error.log" ]; then
                 echo "=== ERROR LOG ==="
                 cat combine_error.log
+            fi
+
+            if [ -f "combine_progress.log" ]; then
+                echo "=== PROGRESS LOG ==="
+                tail -50 combine_progress.log
             fi
 
             echo "Creating error report file"
@@ -750,14 +775,20 @@ process combine_results {
             # Include log content if available
             if [ -f "combine.log" ]; then
                 echo "# Log content:" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-                tail -20 combine.log >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" 2>/dev/null || true
+                tail -50 combine.log >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" 2>/dev/null || true
+            fi
+
+            # If timeout occurred, make that clear
+            if [ \$combine_exit_code -eq 124 ]; then
+                echo "# ERROR: Process timed out after 24 hours" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
+                echo "# Consider splitting your dataset or increasing the timeout further" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
             fi
         fi
-    else
+    else {
         echo "No files found to combine, creating empty output file"
         echo "# No VAST-tools output files found to combine" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
         echo "# Created: \$(date)" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-    fi
+    }
     """
 }
 
