@@ -784,11 +784,11 @@ process combine_results {
                 echo "# Consider splitting your dataset or increasing the timeout further" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
             fi
         fi
-    else {
+    else
         echo "No files found to combine, creating empty output file"
-        echo "# No VAST-tools output files found to combine" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-        echo "# Created: \$(date)" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-    }
+        echo "# No VAST-tools output files found to combine" > "ewing_splicing_PRJNA407215_INCLUSION_LEVELS_FULL-hg19.tab"
+        echo "# Created: $(date)" >> "ewing_splicing_PRJNA407215_INCLUSION_LEVELS_FULL-hg19.tab"
+    fi
     """
 }
 
