@@ -787,7 +787,7 @@ process combine_results {
     else
         echo "No files found to combine, creating empty output file"
         echo "# No VAST-tools output files found to combine" > "ewing_splicing_PRJNA407215_INCLUSION_LEVELS_FULL-hg19.tab"
-        echo "# Created: $(date)" >> "ewing_splicing_PRJNA407215_INCLUSION_LEVELS_FULL-hg19.tab"
+        echo "# Created: \$(date)" >> "ewing_splicing_PRJNA407215_INCLUSION_LEVELS_FULL-hg19.tab"
     fi
     """
 }
