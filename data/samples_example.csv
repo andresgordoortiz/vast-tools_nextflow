@@ -1,5 +1,7 @@
 sample,fastq_1,fastq_2,type,group
 control_rep1,control_rep1_R1.fastq.gz,control_rep1_R2.fastq.gz,paired,control
 control_rep2,control_rep2_R1.fastq.gz,control_rep2_R2.fastq.gz,paired,control
+control_rep3,control_rep3_R1.fastq.gz,control_rep3_R2.fastq.gz,paired,control
 treatment_rep1,treatment_rep1_R1.fastq.gz,treatment_rep1_R2.fastq.gz,paired,treatment
 treatment_rep2,treatment_rep2_R1.fastq.gz,treatment_rep2_R2.fastq.gz,paired,treatment
+treatment_rep3,treatment_rep3_R1.fastq.gz,treatment_rep3_R2.fastq.gz,paired,treatment

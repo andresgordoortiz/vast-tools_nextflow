@@ -31,6 +31,11 @@ params.project_name = "oocyte_splicing_analysis"  // Custom project name for out
 // Change from default value to null to make it mandatory
 params.data_dir = null  // Now mandatory - directory containing input FASTQ files
 
+// VAST-tools compare parameters
+params.skip_compare = false  // Skip differential splicing analysis (vast-tools compare)
+params.min_dPSI = 10  // Minimum delta PSI for vast-tools compare
+params.min_range = 5  // Minimum range for vast-tools compare
+
 // Display help message
 def helpMessage() {
     log.info"""
@@ -67,6 +72,15 @@ def helpMessage() {
       --skip_rmarkdown      Skip RMarkdown report generation (default: ${params.skip_rmarkdown})
       --rmd_file            Path to RMarkdown file for report (default: ${params.rmd_file})
       --multiqc_config      Path to MultiQC config file (default: none)
+
+    Differential Splicing (vast-tools compare) Arguments:
+      --skip_compare        Skip differential splicing analysis (default: ${params.skip_compare})
+      --min_dPSI            Minimum delta PSI threshold (default: ${params.min_dPSI})
+      --min_range           Minimum range threshold (default: ${params.min_range})
+
+    Note: If your sample CSV contains a 'group' column with 2+ groups, the pipeline
+    will automatically run vast-tools compare for all pairwise group comparisons.
+    For paired-end samples, the --paired flag is automatically added.
 
     Example Command:
       nextflow run main.nf --sample_csv samples.csv --vastdb_path /path/to/vastdb --data_dir /path/to/data --species mm10 --outdir results
@@ -792,6 +806,64 @@ process combine_results {
     """
 }
 
+process compare_groups {
+    tag "VAST-tools compare: ${group_a} vs ${group_b}"
+    label 'process_medium'
+    publishDir "${params.outdir}/compare_results", mode: 'copy'
+    container 'andresgordoortiz/vast-tools:latest'
+
+    // Resource requirements
+    cpus 4
+    memory { 16.GB }
+    time { 2.hours }
+
+    input:
+    path inclusion_table
+    val group_a
+    val group_b
+    val samples_a
+    val samples_b
+    val is_paired
+    val vastdb_path
+
+    output:
+    path "compare_${group_a}_vs_${group_b}/*", emit: compare_results
+
+    script:
+    def paired_flag = is_paired ? "--paired" : ""
+    def samples_a_str = samples_a.join(',')
+    def samples_b_str = samples_b.join(',')
+    """
+    echo "Running VAST-tools compare: ${group_a} vs ${group_b}"
+    echo "Samples in ${group_a}: ${samples_a_str}"
+    echo "Samples in ${group_b}: ${samples_b_str}"
+    echo "Paired-end data: ${is_paired}"
+    echo "Parameters: --min_dPSI ${params.min_dPSI} --min_range ${params.min_range}"
+
+    # Set up VASTDB
+    export VASTDB=/usr/local/vast-tools/VASTDB
+
+    # Create output directory
+    mkdir -p compare_${group_a}_vs_${group_b}
+
+    # Run vast-tools compare
+    vast-tools compare ${inclusion_table} \\
+        -a ${samples_a_str} \\
+        -b ${samples_b_str} \\
+        --min_dPSI ${params.min_dPSI} \\
+        --min_range ${params.min_range} \\
+        ${paired_flag} \\
+        -sp ${params.species} \\
+        --outDir compare_${group_a}_vs_${group_b}
+
+    echo "✓ Comparison complete: ${group_a} vs ${group_b}"
+
+    # List output files
+    echo "Output files:"
+    ls -la compare_${group_a}_vs_${group_b}/
+    """
+}
+
 process run_rmarkdown_report {
     tag "Generate R analysis report"
     label 'process_high'
@@ -890,6 +962,66 @@ def getVastdbDirName(species) {
            species
 }
 
+// Function to parse sample CSV and extract group information for compare
+def parseGroupsFromCsv(sampleCsv) {
+    def groups = [:]
+    def has_paired = false
+
+    def csvFile = file(sampleCsv)
+    def lines = csvFile.readLines()
+    def headers = lines[0].split(',').collect { it.trim().toLowerCase() }
+
+    def sampleIdx = headers.indexOf('sample')
+    def typeIdx = headers.indexOf('type')
+    def groupIdx = headers.indexOf('group')
+
+    if (groupIdx == -1) {
+        return [groups: [:], has_paired: false]
+    }
+
+    lines.drop(1).each { line ->
+        def values = line.split(',').collect { it.trim() }
+        if (values.size() > groupIdx && values[groupIdx]) {
+            def sample = values[sampleIdx]
+            def type = values[typeIdx].toLowerCase()
+            def group = values[groupIdx]
+
+            if (!groups.containsKey(group)) {
+                groups[group] = []
+            }
+            groups[group] << sample
+
+            if (type == 'paired') {
+                has_paired = true
+            }
+        }
+    }
+
+    return [groups: groups, has_paired: has_paired]
+}
+
+// Function to generate pairwise comparisons
+def generatePairwiseComparisons(groupsMap, has_paired) {
+    def comparisons = []
+    def groupNames = groupsMap.keySet().toList()
+
+    for (int i = 0; i < groupNames.size(); i++) {
+        for (int j = i + 1; j < groupNames.size(); j++) {
+            def group_a = groupNames[i]
+            def group_b = groupNames[j]
+            comparisons << [
+                group_a: group_a,
+                group_b: group_b,
+                samples_a: groupsMap[group_a],
+                samples_b: groupsMap[group_b],
+                is_paired: has_paired
+            ]
+        }
+    }
+
+    return comparisons
+}
+
 // Define a function to parse the sample CSV and create channels
 def parseSamplesCsv(sampleCsv) {
     Channel.fromPath(sampleCsv)
@@ -985,6 +1117,9 @@ workflow {
       - Skip Trimming:     ${params.skip_trimming}
       - Skip FastQC in Trimming: ${params.skip_fastqc_in_trimming}
       - Skip RMarkdown:    ${params.skip_rmarkdown}
+      - Skip Compare:      ${params.skip_compare}
+      - Min dPSI:          ${params.min_dPSI}
+      - Min Range:         ${params.min_range}
     """
 
     // Prepare VASTDB - now just validates paths
@@ -1071,11 +1206,38 @@ workflow {
         log.info "Skipping RMarkdown report as per user request or missing RMarkdown file."
     }
 
-    log.info """
-    ======================================
-     Pipeline Execution Complete
-    ======================================
+    // Run vast-tools compare for pairwise group comparisons if groups are defined
+    if (!params.skip_compare) {
+        // Parse groups from CSV file
+        def groupInfo = parseGroupsFromCsv(params.sample_csv)
+        def groups = groupInfo.groups
+        def has_paired = groupInfo.has_paired
 
-    Results are available in: ${params.outdir}
-    """
-}
+        if (groups.size() >= 2) {
+            log.info "Found ${groups.size()} groups for comparison: ${groups.keySet().join(', ')}"
+            log.info "Paired-end data detected: ${has_paired}"
+
+            // Generate pairwise comparisons
+            def comparisons = generatePairwiseComparisons(groups, has_paired)
+            log.info "Will run ${comparisons.size()} pairwise comparison(s)"
+
+            // Create channel from comparisons and combine with inclusion table
+            // Each item will be: [comparison_map, inclusion_table_path]
+            compare_channel = Channel.from(comparisons)
+                .combine(inclusion_table)
+
+            // Run compare for each pair
+            compare_results = compare_groups(
+                compare_channel.map { it[1] },         // inclusion_table (from combine)
+                compare_channel.map { it[0].group_a },
+                compare_channel.map { it[0].group_b },
+                compare_channel.map { it[0].samples_a },
+                compare_channel.map { it[0].samples_b },
+                compare_channel.map { it[0].is_paired },
+                params.vastdb_path
+            )
+        } else {
+            log.info "Skipping vast-tools compare: Need at least 2 groups, found ${groups.size()}"
+        }
+    } else {
+        log.info "Skipping vast-tools compare as per user request."

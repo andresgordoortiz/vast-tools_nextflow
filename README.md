@@ -99,6 +99,9 @@ srun submit_nf.sh main.nf \
 | `--skip_fastqc` | `false` | Add this flag to skip quality control |
 | `--skip_trimming` | `false` | Add this flag to skip read trimming |
 | `--skip_rmarkdown` | `false` | Add this flag to skip R report generation |
+| `--skip_compare` | `false` | Add this flag to skip differential splicing analysis |
+| `--min_dPSI` | `10` | Minimum delta PSI threshold for differential splicing |
+| `--min_range` | `5` | Minimum range threshold for differential splicing |
 
 ### Available Species
 
@@ -115,6 +118,66 @@ srun submit_nf.sh main.nf \
 > **📍 VAST-DB Location on CRG Cluster:**
 > The database is already available at: `/users/mirimia/projects/vast-tools/VASTDB/`
 > You don't need to download it!
+
+---
+
+## 🔬 Differential Splicing Analysis (vast-tools compare)
+
+**Automatic group comparison!** If your sample sheet contains a `group` column with 2 or more different groups, the pipeline will automatically run `vast-tools compare` for all pairwise group comparisons.
+
+### How It Works
+
+1. The pipeline detects groups from your CSV file
+2. For each pair of groups (e.g., "control" vs "treatment"), it runs `vast-tools compare`
+3. If your samples are **paired-end**, the `--paired` flag is automatically added
+
+### Example with 2 Groups
+
+With this sample sheet:
+```csv
+sample,fastq_1,fastq_2,type,group
+ctrl_1,ctrl_1_R1.fastq.gz,ctrl_1_R2.fastq.gz,paired,control
+ctrl_2,ctrl_2_R1.fastq.gz,ctrl_2_R2.fastq.gz,paired,control
+treat_1,treat_1_R1.fastq.gz,treat_1_R2.fastq.gz,paired,treatment
+treat_2,treat_2_R1.fastq.gz,treat_2_R2.fastq.gz,paired,treatment
+```
+
+The pipeline will automatically run:
+```
+vast-tools compare INCLUSION_TABLE.tab -a ctrl_1,ctrl_2 -b treat_1,treat_2 --min_dPSI 10 --min_range 5 --paired
+```
+
+### Example with 3 Groups
+
+With 3 groups (control, treatment_A, treatment_B), the pipeline will run **3 comparisons**:
+- control vs treatment_A
+- control vs treatment_B
+- treatment_A vs treatment_B
+
+### Customizing Compare Parameters
+
+You can adjust the thresholds:
+```bash
+srun submit_nf.sh main.nf \
+    --sample_csv /path/to/samples.csv \
+    --data_dir /path/to/data/ \
+    --vastdb_path /users/mirimia/projects/vast-tools/VASTDB/ \
+    --species hg19 \
+    --project_name my_project \
+    --min_dPSI 15 \
+    --min_range 10 \
+    -c nextflow.config \
+    -work-dir /nfs/scratch01/yourlab/yourname/
+```
+
+### Skipping Compare
+
+If you don't want differential analysis, add `--skip_compare`:
+```bash
+srun submit_nf.sh main.nf \
+    ... \
+    --skip_compare
+```
 
 ---
 
@@ -149,10 +212,18 @@ nextflow_results/
 │   └── multiqc_report.html  # Summary QC report (open in browser)
 ├── trimmed_reads/           # Cleaned FASTQ files
 ├── vast_alignment/          # VAST-tools alignment outputs
-└── inclusion_tables/        # ⭐ Main results: splicing quantification tables
+├── inclusion_tables/        # ⭐ Main results: splicing quantification tables
+└── compare_results/         # 🔬 Differential splicing results (if groups defined)
+    └── compare_groupA_vs_groupB/
 ```
 
-**📌 Key output:** The `*_INCLUSION_LEVELS_FULL-*.tab` files contain your splicing quantification results.
+### Key Output Files
+
+| File | Description |
+|------|-------------|
+| `*_INCLUSION_LEVELS_FULL-*.tab` | Main splicing quantification table (PSI values for all events) |
+| `compare_*/DiffAS-*.tab` | Differentially spliced events between groups |
+| `multiqc_report.html` | Summary quality control report |
 
 ---
 
