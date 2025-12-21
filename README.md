@@ -58,7 +58,6 @@ srun submit_nf.sh main.nf \
     --vastdb_path /users/mirimia/projects/vast-tools/VASTDB/ \
     --species hg19 \
     --project_name my_project_name \
-    --skip_rmarkdown \
     -c nextflow.config \
     -work-dir /nfs/scratch01/yourlab/yourname/
 ```
@@ -98,7 +97,6 @@ srun submit_nf.sh main.nf \
 | `--outdir` | `nextflow_results` | Where results will be saved |
 | `--skip_fastqc` | `false` | Add this flag to skip quality control |
 | `--skip_trimming` | `false` | Add this flag to skip read trimming |
-| `--skip_rmarkdown` | `false` | Add this flag to skip R report generation |
 | `--skip_compare` | `false` | Add this flag to skip differential splicing analysis |
 | `--min_dPSI` | `10` | Minimum delta PSI threshold for differential splicing |
 | `--min_range` | `5` | Minimum range threshold for differential splicing |
@@ -194,7 +192,6 @@ srun submit_nf.sh main.nf \
     --vastdb_path /users/mirimia/projects/vast-tools/VASTDB/ \
     --species hg19 \
     --project_name ewing_sarcoma_analysis \
-    --skip_rmarkdown \
     -c nextflow.config \
     -work-dir /nfs/scratch01/aaljord/agordo/
 ```

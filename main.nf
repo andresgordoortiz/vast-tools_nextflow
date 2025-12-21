@@ -21,8 +21,8 @@ params.help = false
 params.skip_fastqc = false  // Option to skip FastQC step
 params.skip_trimming = false  // Option to skip trimming step
 params.skip_fastqc_in_trimming = false  // Option to skip FastQC within trim_galore
-params.skip_rmarkdown = false  // Option to skip the final Rmarkdown report
-params.rmd_file = "$projectDir/scripts/R/notebooks/Oocyte_fmndko_spireko_complete.Rmd"
+params.skip_rmarkdown = true  // DEPRECATED - RMarkdown report generation is disabled
+params.rmd_file = "$projectDir/scripts/R/notebooks/Oocyte_fmndko_spireko_complete.Rmd"  // DEPRECATED
 params.prot_impact_url = "https://vastdb.crg.eu/downloads/mm10/PROT_IMPACT-mm10-v3.tab.gz"
 params.species = "mm10"  // Default species for VAST-tools alignment
 params.multiqc_config = null  // Path to multiqc config file (optional)
@@ -69,8 +69,6 @@ def helpMessage() {
       --skip_fastqc         Skip FastQC quality control (default: ${params.skip_fastqc})
       --skip_trimming       Skip trimming of reads (default: ${params.skip_trimming})
       --skip_fastqc_in_trimming  Skip FastQC within trim_galore (default: ${params.skip_fastqc_in_trimming})
-      --skip_rmarkdown      Skip RMarkdown report generation (default: ${params.skip_rmarkdown})
-      --rmd_file            Path to RMarkdown file for report (default: ${params.rmd_file})
       --multiqc_config      Path to MultiQC config file (default: none)
 
     Differential Splicing (vast-tools compare) Arguments:
@@ -1116,7 +1114,6 @@ workflow {
       - Skip FastQC:       ${params.skip_fastqc}
       - Skip Trimming:     ${params.skip_trimming}
       - Skip FastQC in Trimming: ${params.skip_fastqc_in_trimming}
-      - Skip RMarkdown:    ${params.skip_rmarkdown}
       - Skip Compare:      ${params.skip_compare}
       - Min dPSI:          ${params.min_dPSI}
       - Min Range:         ${params.min_range}
@@ -1198,13 +1195,8 @@ workflow {
         )
     }
 
-    // Run the RMarkdown report if not skipped
-    if (!params.skip_rmarkdown) {
-        // Use the params.rmd_file directly since we validated it exists
-        report = run_rmarkdown_report(inclusion_table, params.rmd_file)
-    } else {
-        log.info "Skipping RMarkdown report as per user request or missing RMarkdown file."
-    }
+    // RMarkdown report generation is deprecated/disabled
+    // To re-enable in the future, set params.skip_rmarkdown = false
 
     // Run vast-tools compare for pairwise group comparisons if groups are defined
     if (!params.skip_compare) {
