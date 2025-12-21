@@ -36,6 +36,10 @@ params.skip_compare = false  // Skip differential splicing analysis (vast-tools 
 params.min_dPSI = 10  // Minimum delta PSI for vast-tools compare
 params.min_range = 5  // Minimum range for vast-tools compare
 
+// MATT analysis parameters
+params.skip_matt = false  // Skip MATT feature analysis (requires compare to run)
+params.matt_intron_length = 150  // Length of intronic region to search for SF1 hits
+
 // Display help message
 def helpMessage() {
     log.info"""
@@ -76,9 +80,14 @@ def helpMessage() {
       --min_dPSI            Minimum delta PSI threshold (default: ${params.min_dPSI})
       --min_range           Minimum range threshold (default: ${params.min_range})
 
+    MATT Feature Analysis Arguments:
+      --skip_matt           Skip MATT feature analysis (default: ${params.skip_matt})
+      --matt_intron_length  Intronic region length for SF1 search (default: ${params.matt_intron_length})
+
     Note: If your sample CSV contains a 'group' column with 2+ groups, the pipeline
     will automatically run vast-tools compare for all pairwise group comparisons.
     For paired-end samples, the --paired flag is automatically added.
+    MATT analysis runs automatically after compare (if not skipped).
 
     Example Command:
       nextflow run main.nf --sample_csv samples.csv --vastdb_path /path/to/vastdb --data_dir /path/to/data --species mm10 --outdir results
@@ -825,6 +834,7 @@ process compare_groups {
     val vastdb_path
 
     output:
+    tuple val(group_a), val(group_b), path("compare_${group_a}_vs_${group_b}"), emit: compare_output
     path "compare_${group_a}_vs_${group_b}/*", emit: compare_results
 
     script:
@@ -859,6 +869,312 @@ process compare_groups {
     # List output files
     echo "Output files:"
     ls -la compare_${group_a}_vs_${group_b}/
+    """
+}
+
+// Process to download reference files (GTF and FASTA) for MATT
+process download_matt_references {
+    tag "Download references for ${species}"
+    label 'process_low'
+    storeDir "${params.outdir}/matt_references"
+
+    // Resource requirements
+    cpus 2
+    memory { 4.GB }
+    time { 2.hours }
+
+    input:
+    val species
+
+    output:
+    tuple val(species), path("*.gtf"), path("*.fa"), emit: references
+
+    script:
+    // Map species to Ensembl release and assembly
+    def ensembl_info = [
+        'hg19': [release: '75', assembly: 'GRCh37', species_name: 'homo_sapiens', matt_code: 'Hsap'],
+        'hg38': [release: '110', assembly: 'GRCh38', species_name: 'homo_sapiens', matt_code: 'Hsap'],
+        'mm9':  [release: '67', assembly: 'NCBIM37', species_name: 'mus_musculus', matt_code: 'Mmus'],
+        'mm10': [release: '102', assembly: 'GRCm38', species_name: 'mus_musculus', matt_code: 'Mmus'],
+        'rn6':  [release: '104', assembly: 'Rnor_6.0', species_name: 'rattus_norvegicus', matt_code: 'Rnor'],
+        'dm6':  [release: '104', assembly: 'BDGP6.32', species_name: 'drosophila_melanogaster', matt_code: 'Dmel']
+    ]
+
+    def info = ensembl_info[species]
+    if (!info) {
+        error "Species ${species} not supported for MATT analysis. Supported: ${ensembl_info.keySet().join(', ')}"
+    }
+
+    def species_cap = info.species_name.split('_').collect { it.capitalize() }.join('_')
+    def gtf_url = ""
+    def fasta_url = ""
+
+    // Use archive for older releases
+    if (info.release.toInteger() <= 75) {
+        gtf_url = "https://ftp.ensembl.org/pub/release-${info.release}/gtf/${info.species_name}/${species_cap}.${info.assembly}.${info.release}.gtf.gz"
+        fasta_url = "https://ftp.ensembl.org/pub/release-${info.release}/fasta/${info.species_name}/dna/${species_cap}.${info.assembly}.${info.release}.dna.primary_assembly.fa.gz"
+    } else {
+        gtf_url = "https://ftp.ensembl.org/pub/release-${info.release}/gtf/${info.species_name}/${species_cap}.${info.assembly}.${info.release}.gtf.gz"
+        fasta_url = "https://ftp.ensembl.org/pub/release-${info.release}/fasta/${info.species_name}/dna/${species_cap}.${info.assembly}.dna.primary_assembly.fa.gz"
+    }
+
+    """
+    echo "Downloading GTF and FASTA for ${species} (Ensembl release ${info.release})..."
+
+    # Download GTF
+    echo "Downloading GTF from: ${gtf_url}"
+    wget -q "${gtf_url}" -O ${species}.gtf.gz || curl -sL "${gtf_url}" -o ${species}.gtf.gz
+    gunzip ${species}.gtf.gz
+
+    # Download FASTA - try primary_assembly first, fall back to toplevel
+    echo "Downloading FASTA..."
+    if ! wget -q "${fasta_url}" -O ${species}.fa.gz 2>/dev/null; then
+        echo "Primary assembly not found, trying toplevel..."
+        fasta_toplevel="${fasta_url/primary_assembly/toplevel}"
+        wget -q "\${fasta_toplevel}" -O ${species}.fa.gz || curl -sL "\${fasta_toplevel}" -o ${species}.fa.gz
+    fi
+    gunzip ${species}.fa.gz
+
+    echo "✓ Downloaded reference files for ${species}"
+    ls -la
+    """
+}
+
+// Process to prepare MATT input from vast-tools compare output
+process prepare_matt_input {
+    tag "Prepare MATT input: ${group_a} vs ${group_b}"
+    label 'process_low'
+    publishDir "${params.outdir}/matt_analysis/${group_a}_vs_${group_b}/input", mode: 'copy'
+
+    // Resource requirements
+    cpus 1
+    memory { 2.GB }
+    time { 30.min }
+
+    input:
+    path compare_dir
+    val group_a
+    val group_b
+    val species
+
+    output:
+    tuple val(group_a), val(group_b), path("exons_for_matt.tab"), path("introns_for_matt.tab"), emit: matt_input
+
+    script:
+    """
+    #!/bin/bash
+    set -e
+
+    echo "Preparing MATT input for ${group_a} vs ${group_b}"
+    echo "Looking for files in ${compare_dir}"
+
+    # Find the diff file
+    DIFF_FILE=\$(find ${compare_dir} -name "*.tab" -type f | head -1)
+
+    if [ -z "\$DIFF_FILE" ]; then
+        echo "WARNING: No differential splicing files found. Creating empty MATT input files."
+        echo -e "START\\tEND\\tSCAFFOLD\\tSTRAND\\tGENEID\\tEVENT_ID\\tDATASET" > exons_for_matt.tab
+        echo -e "START\\tEND\\tSCAFFOLD\\tSTRAND\\tGENEID\\tEVENT_ID\\tDATASET" > introns_for_matt.tab
+        exit 0
+    fi
+
+    echo "Processing file: \$DIFF_FILE"
+
+    # Create header for output files
+    echo -e "START\\tEND\\tSCAFFOLD\\tSTRAND\\tGENEID\\tEVENT_ID\\tDATASET\\tdPSI" > exons_for_matt.tab
+    echo -e "START\\tEND\\tSCAFFOLD\\tSTRAND\\tGENEID\\tEVENT_ID\\tDATASET\\tdPSI" > introns_for_matt.tab
+
+    # Process the vast-tools compare output
+    # Typical columns: GENE, EVENT, COORD, LENGTH, FullCO, COMPLEX, dPSI, etc.
+    # COORD format: chrX:start-end or more complex patterns
+
+    awk -F'\\t' '
+    BEGIN { OFS="\\t" }
+    NR==1 {
+        # Find column indices
+        for (i=1; i<=NF; i++) {
+            if (\$i == "GENE" || \$i == "GeneID") gene_col = i
+            if (\$i == "EVENT" || \$i == "EventType") event_col = i
+            if (\$i == "COORD" || \$i == "CO" || \$i == "FullCO") coord_col = i
+            if (\$i == "dPSI" || \$i == "deltaPSI") dpsi_col = i
+            if (\$i == "STRAND" || \$i == "Strand") strand_col = i
+        }
+        # Set defaults if not found
+        if (!gene_col) gene_col = 1
+        if (!event_col) event_col = 2
+        if (!coord_col) coord_col = 3
+        if (!dpsi_col) dpsi_col = 0
+        if (!strand_col) strand_col = 0
+        next
+    }
+    NR>1 {
+        gene = \$gene_col
+        event = \$event_col
+        coord = \$coord_col
+        dpsi = (dpsi_col > 0) ? \$dpsi_col : 0
+        strand = (strand_col > 0) ? \$strand_col : "+"
+
+        # Parse coordinate: chr:start-end
+        if (match(coord, /([^:]+):([0-9]+)-([0-9]+)/, arr)) {
+            chrom = arr[1]
+            start = arr[2]
+            end = arr[3]
+        } else {
+            next
+        }
+
+        # Determine dataset based on dPSI
+        if (dpsi == "" || dpsi == "NA") {
+            dataset = "ndiff"
+        } else if (dpsi + 0 > ${params.min_dPSI}) {
+            dataset = "up"
+        } else if (dpsi + 0 < -${params.min_dPSI}) {
+            dataset = "down"
+        } else {
+            dataset = "ndiff"
+        }
+
+        event_id = gene "_" event "_" chrom ":" start "-" end
+
+        # Output line
+        line = start "\\t" end "\\t" chrom "\\t" strand "\\t" gene "\\t" event_id "\\t" dataset "\\t" dpsi
+
+        # Classify as exon or intron
+        event_lower = tolower(event)
+        if (index(event_lower, "ir") > 0 || index(event_lower, "intron") > 0) {
+            print line >> "introns_for_matt.tab"
+        } else {
+            print line >> "exons_for_matt.tab"
+        }
+    }
+    ' "\$DIFF_FILE"
+
+    echo "Exon events:"
+    wc -l exons_for_matt.tab
+
+    echo "Intron events:"
+    wc -l introns_for_matt.tab
+
+    echo "✓ MATT input files created"
+    """
+// Process to run MATT cmpr_exons
+process run_matt_exons {
+    tag "MATT exons: ${group_a} vs ${group_b}"
+    label 'process_medium'
+    publishDir "${params.outdir}/matt_analysis/${group_a}_vs_${group_b}/exons", mode: 'copy'
+    container 'andresgordoortiz/matt-container:latest'
+
+    // Resource requirements
+    cpus 4
+    memory { 16.GB }
+    time { 4.hours }
+
+    input:
+    tuple val(group_a), val(group_b), path(exons_tab), path(introns_tab)
+    tuple val(species), path(gtf), path(fasta)
+
+    output:
+    path "matt_exons_${group_a}_vs_${group_b}/*", emit: exon_results, optional: true
+
+    script:
+    def matt_species = [
+        'hg19': 'Hsap', 'hg38': 'Hsap',
+        'mm9': 'Mmus', 'mm10': 'Mmus',
+        'rn6': 'Rnor', 'dm6': 'Dmel'
+    ][species] ?: 'Hsap'
+
+    """
+    echo "Running MATT cmpr_exons for ${group_a} vs ${group_b}"
+    echo "Species: ${species} (MATT code: ${matt_species})"
+    echo "Intron length parameter: ${params.matt_intron_length}"
+
+    # Check if we have exons to analyze
+    exon_count=\$(wc -l < ${exons_tab})
+    echo "Number of exon events: \$((exon_count - 1))"
+
+    if [ \$exon_count -le 1 ]; then
+        echo "No exon events to analyze. Skipping MATT cmpr_exons."
+        mkdir -p matt_exons_${group_a}_vs_${group_b}
+        echo "No exon events found for analysis" > matt_exons_${group_a}_vs_${group_b}/no_events.txt
+        exit 0
+    fi
+
+    # Create output directory
+    mkdir -p matt_exons_${group_a}_vs_${group_b}
+
+    # Run MATT cmpr_exons
+    # Format: matt cmpr_exons TABLE START END SCAFFOLD STRAND GENEID GTF FASTA SPECIES INTRON_LENGTH DATASET[groups] OUTPUT_DIR
+    matt cmpr_exons ${exons_tab} \\
+        START END SCAFFOLD STRAND GENEID \\
+        ${gtf} ${fasta} ${matt_species} ${params.matt_intron_length} \\
+        DATASET[up,down,ndiff] \\
+        matt_exons_${group_a}_vs_${group_b} || {
+            echo "MATT cmpr_exons failed, but continuing..."
+            echo "MATT analysis failed" > matt_exons_${group_a}_vs_${group_b}/error.txt
+        }
+
+    echo "✓ MATT exon analysis complete"
+    ls -la matt_exons_${group_a}_vs_${group_b}/ || true
+    """
+}
+
+// Process to run MATT cmpr_introns
+process run_matt_introns {
+    tag "MATT introns: ${group_a} vs ${group_b}"
+    label 'process_medium'
+    publishDir "${params.outdir}/matt_analysis/${group_a}_vs_${group_b}/introns", mode: 'copy'
+    container 'andresgordoortiz/matt-container:latest'
+
+    // Resource requirements
+    cpus 4
+    memory { 16.GB }
+    time { 4.hours }
+
+    input:
+    tuple val(group_a), val(group_b), path(exons_tab), path(introns_tab)
+    tuple val(species), path(gtf), path(fasta)
+
+    output:
+    path "matt_introns_${group_a}_vs_${group_b}/*", emit: intron_results, optional: true
+
+    script:
+    def matt_species = [
+        'hg19': 'Hsap', 'hg38': 'Hsap',
+        'mm9': 'Mmus', 'mm10': 'Mmus',
+        'rn6': 'Rnor', 'dm6': 'Dmel'
+    ][species] ?: 'Hsap'
+
+    """
+    echo "Running MATT cmpr_introns for ${group_a} vs ${group_b}"
+    echo "Species: ${species} (MATT code: ${matt_species})"
+    echo "Intron length parameter: ${params.matt_intron_length}"
+
+    # Check if we have introns to analyze
+    intron_count=\$(wc -l < ${introns_tab})
+    echo "Number of intron events: \$((intron_count - 1))"
+
+    if [ \$intron_count -le 1 ]; then
+        echo "No intron events to analyze. Skipping MATT cmpr_introns."
+        mkdir -p matt_introns_${group_a}_vs_${group_b}
+        echo "No intron events found for analysis" > matt_introns_${group_a}_vs_${group_b}/no_events.txt
+        exit 0
+    fi
+
+    # Create output directory
+    mkdir -p matt_introns_${group_a}_vs_${group_b}
+
+    # Run MATT cmpr_introns
+    matt cmpr_introns ${introns_tab} \\
+        START END SCAFFOLD STRAND GENEID \\
+        ${gtf} ${fasta} ${matt_species} ${params.matt_intron_length} \\
+        DATASET[up,down,ndiff] \\
+        matt_introns_${group_a}_vs_${group_b} || {
+            echo "MATT cmpr_introns failed, but continuing..."
+            echo "MATT analysis failed" > matt_introns_${group_a}_vs_${group_b}/error.txt
+        }
+
+    echo "✓ MATT intron analysis complete"
+    ls -la matt_introns_${group_a}_vs_${group_b}/ || true
     """
 }
 
@@ -1117,6 +1433,8 @@ workflow {
       - Skip Compare:      ${params.skip_compare}
       - Min dPSI:          ${params.min_dPSI}
       - Min Range:         ${params.min_range}
+      - Skip MATT:         ${params.skip_matt}
+      - MATT intron length: ${params.matt_intron_length}
     """
 
     // Prepare VASTDB - now just validates paths
@@ -1228,6 +1546,40 @@ workflow {
                 compare_channel.map { it[0].is_paired },
                 params.vastdb_path
             )
+
+            // Run MATT analysis if not skipped
+            if (!params.skip_matt) {
+                log.info "MATT analysis enabled - downloading reference files..."
+
+                // Download reference files for MATT (GTF and FASTA)
+                matt_refs = download_matt_references(params.species)
+
+                // Prepare MATT input from compare output and run MATT
+                // Use the compare_output channel which emits [group_a, group_b, compare_dir]
+                matt_input = prepare_matt_input(
+                    compare_results.compare_output.map { it[2] },  // compare directory
+                    compare_results.compare_output.map { it[0] },  // group_a
+                    compare_results.compare_output.map { it[1] },  // group_b
+                    params.species
+                )
+
+                // Run MATT cmpr_exons
+                exon_analysis = run_matt_exons(
+                    matt_input,
+                    matt_refs
+                )
+
+                // Run MATT cmpr_introns
+                intron_analysis = run_matt_introns(
+                    matt_input,
+                    matt_refs
+                )
+
+                log.info "MATT analysis jobs submitted"
+            } else {
+                log.info "Skipping MATT analysis as per user request."
+            }
+
         } else {
             log.info "Skipping vast-tools compare: Need at least 2 groups, found ${groups.size()}"
         }

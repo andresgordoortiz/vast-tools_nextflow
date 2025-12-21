@@ -100,6 +100,8 @@ srun submit_nf.sh main.nf \
 | `--skip_compare` | `false` | Add this flag to skip differential splicing analysis |
 | `--min_dPSI` | `10` | Minimum delta PSI threshold for differential splicing |
 | `--min_range` | `5` | Minimum range threshold for differential splicing |
+| `--skip_matt` | `false` | Add this flag to skip MATT feature analysis |
+| `--matt_intron_length` | `150` | Intronic region length for SF1 binding site search |
 
 ### Available Species
 
@@ -210,8 +212,14 @@ nextflow_results/
 ├── trimmed_reads/           # Cleaned FASTQ files
 ├── vast_alignment/          # VAST-tools alignment outputs
 ├── inclusion_tables/        # ⭐ Main results: splicing quantification tables
-└── compare_results/         # 🔬 Differential splicing results (if groups defined)
-    └── compare_groupA_vs_groupB/
+├── compare_results/         # 🔬 Differential splicing results (if groups defined)
+│   └── compare_groupA_vs_groupB/
+├── matt_references/         # Downloaded GTF and FASTA files for MATT
+└── matt_analysis/           # 🧬 MATT feature analysis results
+    └── groupA_vs_groupB/
+        ├── input/           # Prepared input tables for MATT
+        ├── exons/           # Exon feature analysis (PDF report + tables)
+        └── introns/         # Intron feature analysis (PDF report + tables)
 ```
 
 ### Key Output Files
@@ -220,7 +228,46 @@ nextflow_results/
 |------|-------------|
 | `*_INCLUSION_LEVELS_FULL-*.tab` | Main splicing quantification table (PSI values for all events) |
 | `compare_*/DiffAS-*.tab` | Differentially spliced events between groups |
+| `matt_analysis/*/exons/summary.pdf` | MATT exon feature comparison report with box plots |
+| `matt_analysis/*/introns/summary.pdf` | MATT intron feature comparison report with box plots |
 | `multiqc_report.html` | Summary quality control report |
+
+---
+
+## 🧬 MATT Feature Analysis
+
+MATT (Motif Analysis using Transcript features) automatically analyzes sequence and structural features of differentially spliced exons and introns. It runs by default when you have groups defined in your sample CSV.
+
+### What MATT Analyzes
+
+**For exons (`cmpr_exons`):**
+- Exon/intron lengths
+- Splice site strength
+- RNA secondary structure
+- Binding motifs (SF1, etc.)
+- GC content and more
+
+**For introns (`cmpr_introns`):**
+- Intron lengths
+- Branch point features
+- Polypyrimidine tract
+- Splice site sequences
+
+### MATT Output
+
+MATT generates:
+- **`summary.pdf`** - PDF report with box plots comparing feature distributions
+- **Feature tables** - Detailed tables with all extracted features
+- **Statistical tests** - P-values from Mann-Whitney U tests
+
+### Skipping MATT
+
+If you don't need feature analysis, add `--skip_matt`:
+```bash
+srun submit_nf.sh main.nf \
+    ... \
+    --skip_matt
+```
 
 ---
 
