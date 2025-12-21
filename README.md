@@ -1,264 +1,183 @@
 # VAST-TOOLS Splicing Analysis Pipeline
 
-A Nextflow pipeline for analyzing alternative splicing patterns in RNA-Seq data using VAST-tools, specifically designed for FMN2/Spire knockout studies in oocytes.
+A Nextflow pipeline for quantifying alternative splicing in RNA-Seq data using [VAST-tools](https://github.com/vastgroup/vast-tools).
 
-## Overview
+---
 
-This pipeline processes RNA-Seq data to identify and quantify alternative splicing events using the VAST-tools suite. It supports both single-end and paired-end sequencing data, handles technical replicates, and provides comprehensive quality control and reporting.
+## 📋 Quick Start Guide (CRG Cluster)
 
-## Features
+This guide will help you run the pipeline step by step. **No programming experience required!**
 
-- **Flexible Input**: Supports single-end, paired-end, and technical replicate data
-- **Quality Control**: Integrated FastQC and MultiQC reporting
-- **Read Processing**: Optional trimming with Trim Galore
-- **Splicing Analysis**: VAST-tools alignment and splicing quantification
-- **Automated Reporting**: R Markdown-based analysis reports
-- **Containerized**: All processes run in Docker/Singularity containers
+### Step 1: Prepare Your Sample Sheet
 
-## Quick Start
+Create a CSV file (like an Excel spreadsheet saved as CSV) that describes your samples.
 
-```bash
-# Clone the repository
-git clone https://github.com/your-username/vast-tools_nextflow.git
-cd vast-tools_nextflow
-
-# Run the pipeline
-nextflow run main.nf \
-  --sample_csv samples.csv \
-  --vastdb_path /path/to/vastdb \
-  --data_dir /path/to/fastq_files \
-  --outdir results
-```
-
-## Requirements
-
-### Software Dependencies
-
-- [Nextflow](https://nextflow.io/) (≥22.04.0)
-- [Docker](https://www.docker.com/) or [Singularity](https://sylabs.io/singularity/)
-
-### Reference Data
-
-- **VAST-DB**: Download the appropriate species database from [VAST-tools](https://github.com/vastgroup/vast-tools)
-  - For mouse (mm10): Use the Mm2 database
-  - For human (hg38): Use the Hs2 database
-
-## Input Files
-
-### Sample Sheet (CSV)
-
-Create a CSV file with the following required columns:
-
-| Column | Description | Required |
-|--------|-------------|----------|
-| `sample` | Unique sample identifier | ✓ |
-| `fastq_1` | Path to R1 FASTQ file (or single-end file) | ✓ |
-| `fastq_2` | Path to R2 FASTQ file (paired-end only) | For paired-end |
-| `type` | Data type: `single`, `paired`, or `technical_replicate` | ✓ |
-| `group` | Group identifier for the sample | Optional |
-
-#### Example Sample Sheet
+**📁 Example file:** See [data/samples_example.csv](data/samples_example.csv)
 
 ```csv
 sample,fastq_1,fastq_2,type,group
-sample1,reads/sample1_R1.fastq.gz,reads/sample1_R2.fastq.gz,paired,control
-sample2,reads/sample2_R1.fastq.gz,reads/sample2_R2.fastq.gz,paired,knockout
-tech_rep1,reads/tech1_1.fastq.gz,reads/tech1_2.fastq.gz,technical_replicate,control
+control_rep1,control_rep1_R1.fastq.gz,control_rep1_R2.fastq.gz,paired,control
+control_rep2,control_rep2_R1.fastq.gz,control_rep2_R2.fastq.gz,paired,control
+treatment_rep1,treatment_rep1_R1.fastq.gz,treatment_rep1_R2.fastq.gz,paired,treatment
+treatment_rep2,treatment_rep2_R1.fastq.gz,treatment_rep2_R2.fastq.gz,paired,treatment
 ```
 
-For technical replicates, you can add additional columns (`fastq_3`, `fastq_4`, etc.) to specify more files to concatenate.
+#### CSV Columns Explained
 
-## Parameters
+| Column | Required? | Description |
+|--------|-----------|-------------|
+| `sample` | ✅ **Yes** | A unique name for each sample (no spaces, use underscores) |
+| `fastq_1` | ✅ **Yes** | Name of your R1 FASTQ file (or single-end file) |
+| `fastq_2` | For paired-end | Name of your R2 FASTQ file |
+| `type` | ✅ **Yes** | Must be: `single`, `paired`, or `technical_replicate` |
+| `group` | Optional | Group name for comparisons (e.g., "control", "treatment") |
 
-### Mandatory Parameters
+> **💡 Tips for creating your CSV:**
+> - You can create this in Excel and save as "CSV (Comma delimited)"
+> - Make sure column names are exactly as shown (lowercase!)
+> - File names should match your actual FASTQ files exactly
+> - Don't include the full path in `fastq_1`/`fastq_2` - just the file names
 
-| Parameter | Description |
-|-----------|-------------|
-| `--sample_csv` | Path to the sample sheet CSV file |
-| `--vastdb_path` | Path to the VAST-DB directory |
-| `--data_dir` | Directory containing input FASTQ files |
+---
+
+### Step 2: Upload Your Data
+
+1. Upload your **FASTQ files** to a folder on the cluster (e.g., `/users/yourname/projects/my_project/data/`)
+2. Upload your **CSV sample sheet** to the same project folder
+
+---
+
+### Step 3: Run the Pipeline
+
+Connect to the cluster and navigate to **this pipeline folder** (`vast-tools_nextflow/`), then run:
+
+```bash
+srun submit_nf.sh main.nf \
+    --sample_csv /path/to/your/samples.csv \
+    --data_dir /path/to/your/fastq_files/ \
+    --vastdb_path /users/mirimia/projects/vast-tools/VASTDB/ \
+    --species hg19 \
+    --project_name my_project_name \
+    --skip_rmarkdown \
+    -c nextflow.config \
+    -work-dir /nfs/scratch01/yourlab/yourname/
+```
+
+#### 🔧 Replace the placeholders (YOU MUST CHANGE THESE):
+- `/path/to/your/samples.csv` → Full path to your CSV file
+- `/path/to/your/fastq_files/` → Folder containing your FASTQ files
+- `/nfs/scratch01/yourlab/yourname/` → Your scratch folder for temporary files (use scratch!)
+- `my_project_name` → A name for your project (no spaces!)
+- `hg19` → Your species (see available options below)
+
+---
+
+## 📌 Parameters Reference
+
+### Mandatory Parameters (You Must Specify)
+
+| Parameter | Description | Example |
+|-----------|-------------|--------|
+| `--sample_csv` | Path to your CSV sample sheet | `/users/me/project/samples.csv` |
+| `--data_dir` | Folder containing your FASTQ files | `/users/me/project/data/` |
+| `-work-dir` | Scratch folder for temporary files (**use scratch!**) | `/nfs/scratch01/yourlab/yourname/` |
+
+### Fixed Parameters (Already Configured)
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `--vastdb_path` | `/users/mirimia/projects/vast-tools/VASTDB/` | VAST-DB database (already downloaded on cluster) |
+| `-c` | `nextflow.config` | Pipeline config file (included in this repo) |
 
 ### Optional Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--outdir` | `nextflow_results` | Output directory |
-| `--species` | `mm10` | Species for VAST-tools alignment |
-| `--project_name` | `oocyte_splicing_analysis` | Custom project name |
-| `--skip_fastqc` | `false` | Skip FastQC quality control |
-| `--skip_trimming` | `false` | Skip read trimming |
-| `--skip_fastqc_in_trimming` | `false` | Skip FastQC within trim_galore |
-| `--skip_rmarkdown` | `false` | Skip R Markdown report generation |
-| `--rmd_file` | `scripts/R/notebooks/Oocyte_fmndko_spireko_complete.Rmd` | Path to R Markdown file |
-| `--multiqc_config` | `null` | Path to MultiQC config file |
+| `--species` | `mm10` | Species code (see list below) |
+| `--project_name` | `oocyte_splicing_analysis` | Name for your analysis |
+| `--outdir` | `nextflow_results` | Where results will be saved |
+| `--skip_fastqc` | `false` | Add this flag to skip quality control |
+| `--skip_trimming` | `false` | Add this flag to skip read trimming |
+| `--skip_rmarkdown` | `false` | Add this flag to skip R report generation |
 
-### Supported Species
+### Available Species
 
-The pipeline supports the following species (use the species code as `--species` parameter):
+| Code | Species |
+|------|---------|
+| `hg19` | Human (GRCh37) |
+| `hg38` | Human (GRCh38) |
+| `mm9` | Mouse (older assembly) |
+| `mm10` | Mouse (GRCm38) |
+| `rn6` | Rat |
+| `dm6` | Drosophila |
+| `ce11` | C. elegans |
 
-- `hg19`, `hg38` - Human
-- `mm9`, `mm10` - Mouse
-- `rn6` - Rat
-- `dm6` - Drosophila
-- `ce11` - C. elegans
-- And many others (see VAST-tools documentation)
+> **📍 VAST-DB Location on CRG Cluster:**
+> The database is already available at: `/users/mirimia/projects/vast-tools/VASTDB/`
+> You don't need to download it!
 
-## Output Structure
+---
+
+## 📂 Example Command (Full)
+
+Here's a complete example for a human (hg19) RNA-seq splicing analysis.
+
+**Run from the `vast-tools_nextflow/` folder:**
+
+```bash
+srun submit_nf.sh main.nf \
+    --sample_csv /users/agordo/projects/ewing_sarcoma/data/samples.csv \
+    --data_dir /users/agordo/projects/ewing_sarcoma/data/ \
+    --vastdb_path /users/mirimia/projects/vast-tools/VASTDB/ \
+    --species hg19 \
+    --project_name ewing_sarcoma_analysis \
+    --skip_rmarkdown \
+    -c nextflow.config \
+    -work-dir /nfs/scratch01/aaljord/agordo/
+```
+
+---
+
+## 📊 Output Files
+
+After the pipeline finishes, you'll find results in the `nextflow_results/` folder (or your custom `--outdir`):
 
 ```
-results/
+nextflow_results/
 ├── qc/
-│   ├── fastqc/              # FastQC reports
-│   ├── trimming_reports/    # Trim Galore reports
-│   └── multiqc_report.html  # Combined QC report
-├── trimmed_reads/           # Trimmed FASTQ files
+│   ├── fastqc/              # Quality reports for each sample
+│   └── multiqc_report.html  # Summary QC report (open in browser)
+├── trimmed_reads/           # Cleaned FASTQ files
 ├── vast_alignment/          # VAST-tools alignment outputs
-├── inclusion_tables/        # Splicing inclusion tables
-└── report/                  # R Markdown analysis report
+└── inclusion_tables/        # ⭐ Main results: splicing quantification tables
 ```
 
-### Key Output Files
+**📌 Key output:** The `*_INCLUSION_LEVELS_FULL-*.tab` files contain your splicing quantification results.
 
-- **`*_INCLUSION_LEVELS_FULL-*.tab`**: Main splicing quantification table
-- **`multiqc_report.html`**: Comprehensive quality control report
-- **`*.html`**: R Markdown analysis report (if enabled)
+---
 
-## Usage Examples
+## ❓ Troubleshooting
 
-### Basic Usage
+| Problem | Solution |
+|---------|----------|
+| "sample CSV file does not exist" | Check the path to your CSV file is correct |
+| "data directory does not exist" | Check the path to your FASTQ folder |
+| "VASTDB directory does not exist" | Use the path: `/users/mirimia/projects/vast-tools/VASTDB/` |
+| Pipeline stuck or failed | Check the `.nextflow.log` file for error messages |
 
-```bash
-nextflow run main.nf \
-  --sample_csv samples.csv \
-  --vastdb_path /data/vastdb \
-  --data_dir /data/fastq
-```
+---
 
-### Skip Quality Control Steps
-
-```bash
-nextflow run main.nf \
-  --sample_csv samples.csv \
-  --vastdb_path /data/vastdb \
-  --data_dir /data/fastq \
-  --skip_fastqc \
-  --skip_trimming
-```
-
-### Human Data Analysis
-
-```bash
-nextflow run main.nf \
-  --sample_csv human_samples.csv \
-  --vastdb_path /data/vastdb \
-  --data_dir /data/human_fastq \
-  --species hg38 \
-  --project_name human_splicing_study
-```
-
-### Custom Resource Configuration
-
-```bash
-nextflow run main.nf \
-  --sample_csv samples.csv \
-  --vastdb_path /data/vastdb \
-  --data_dir /data/fastq \
-  -profile cluster \
-  --max_cpus 32 \
-  --max_memory 128.GB
-```
-
-## Container Information
-
-The pipeline uses the following containers:
-
-- **VAST-tools**: `andresgordoortiz/vast-tools:latest`
-- **FastQC**: `quay.io/biocontainers/fastqc:0.11.9--0`
-- **Trim Galore**: `https://depot.galaxyproject.org/singularity/trim-galore:0.6.9--hdfd78af_0`
-- **MultiQC**: `multiqc/multiqc:latest`
-- **R Analysis**: `andresgordoortiz/splicing_analysis_r_crg:v1.5`
-
-## Resource Requirements
-
-### Minimum Requirements
-
-- **CPU**: 8 cores
-- **Memory**: 16 GB RAM
-- **Storage**: 100 GB free space
-
-### Recommended for Large Datasets
-
-- **CPU**: 16+ cores
-- **Memory**: 64+ GB RAM
-- **Storage**: 500+ GB free space
-
-## Troubleshooting
-
-### Common Issues
-
-1. **VAST-DB Path Error**
-
-   ```text
-   ERROR: VASTDB directory /path/to/vastdb does not exist!
-   ```
-
-   **Solution**: Ensure the VAST-DB path is correct and accessible.
-
-2. **Missing Sample Files**
-
-   ```text
-   ERROR: The specified sample CSV file does not exist
-   ```
-
-   **Solution**: Check the path to your sample CSV file and ensure all FASTQ files listed exist.
-
-3. **Memory Issues**
-
-   ```text
-   Process exceeded available memory
-   ```
-
-   **Solution**: Increase memory allocation or use fewer parallel processes.
-
-4. **Container Issues**
-
-   ```text
-   Unable to pull Docker image
-   ```
-
-   **Solution**: Ensure Docker/Singularity is properly installed and configured.
-
-### Getting Help
-
-- Check the [Nextflow documentation](https://nextflow.io/docs/latest/)
-- Review [VAST-tools documentation](https://github.com/vastgroup/vast-tools)
-- Open an issue on the project GitHub repository
-
-## Citation
+## 📚 Citation
 
 If you use this pipeline in your research, please cite:
 
-1. **VAST-tools**: Tapial et al. (2017). An atlas of alternative splicing profiles and functional associations reveals new regulatory programs and genes that simultaneously express multiple major isoforms. Genome Research.
+- **VAST-tools**: Tapial et al. (2017). *Genome Research*. [DOI](https://doi.org/10.1101/gr.220962.117)
+- **Nextflow**: Di Tommaso et al. (2017). *Nature Biotechnology*. [DOI](https://doi.org/10.1038/nbt.3820)
 
-2. **Nextflow**: Di Tommaso et al. (2017). Nextflow enables reproducible computational workflows. Nature Biotechnology.
+---
 
-## License
+## 👤 Author
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+**Andrés Gordo** - CRG Barcelona
 
-## Authors
-
-- **Andrés Gordo** - *Initial work*
-
-## Acknowledgments
-
-- VAST-tools development team
-- Nextflow community
-- nf-core project for best practices
-
-## Version History
-
-- **v1.0.0** - Initial release
-  - Support for single-end, paired-end, and technical replicate data
-  - Integrated quality control and reporting
-  - R Markdown analysis reports
+For questions or issues, please open a GitHub issue or contact the author.
