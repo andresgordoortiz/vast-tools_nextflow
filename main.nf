@@ -1078,6 +1078,7 @@ process prepare_matt_input {
 
     echo "✓ MATT input files created"
     """
+}
 // Process to run MATT cmpr_exons
 process run_matt_exons {
     tag "MATT exons: ${group_a} vs ${group_b}"
