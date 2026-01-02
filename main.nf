@@ -928,14 +928,15 @@ process download_matt_references {
 
     # Download FASTA - try primary_assembly first, fall back to toplevel
     echo "Downloading FASTA..."
-    if ! wget -q "${fasta_url}" -O ${species}.fa.gz 2>/dev/null; then
+    FASTA_URL="${fasta_url}"
+    if ! wget -q "\${FASTA_URL}" -O ${species}.fa.gz 2>/dev/null; then
         echo "Primary assembly not found, trying toplevel..."
-        fasta_toplevel="${fasta_url/primary_assembly/toplevel}"
-        wget -q "\${fasta_toplevel}" -O ${species}.fa.gz || curl -sL "\${fasta_toplevel}" -o ${species}.fa.gz
+        FASTA_TOPLEVEL="\${FASTA_URL/primary_assembly/toplevel}"
+        wget -q "\${FASTA_TOPLEVEL}" -O ${species}.fa.gz || curl -sL "\${FASTA_TOPLEVEL}" -o ${species}.fa.gz
     fi
     gunzip ${species}.fa.gz
 
-    echo "✓ Downloaded reference files for ${species}"
+    echo "Downloaded reference files for ${species}"
     ls -la
     """
 }
