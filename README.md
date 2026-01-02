@@ -97,6 +97,10 @@ srun submit_nf.sh main.nf \
 | `--min_range` | `5` | Minimum range threshold for differential splicing |
 | `--skip_matt` | `false` | Add this flag to skip MATT feature analysis |
 | `--matt_intron_length` | `150` | Intronic region length for SF1 binding site search |
+| `--skip_betas` | `false` | Add this flag to skip betAS simulation analysis |
+| `--betas_filter_n` | `10` | Minimum N for filtering events in betAS |
+| `--betas_nsim` | `1000` | Number of simulations for betAS analysis |
+| `--betas_npoints` | `500` | Number of points for betAS volcano plot |
 
 ### Available Species
 
@@ -183,31 +187,87 @@ After the pipeline finishes, you'll find results in the `nextflow_results/` fold
 
 ```
 nextflow_results/
+├── pipeline_summary_*.txt       # ⭐ Pipeline execution summary (text)
+├── pipeline_summary_*.json      # ⭐ Pipeline execution summary (JSON)
 ├── qc/
-│   ├── fastqc/              # Quality reports for each sample
-│   └── multiqc_report.html  # Summary QC report (open in browser)
-├── trimmed_reads/           # Cleaned FASTQ files
-├── vast_alignment/          # VAST-tools alignment outputs
-├── inclusion_tables/        # ⭐ Main results: splicing quantification tables
-├── compare_results/         # 🔬 Differential splicing results (if groups defined)
+│   ├── fastqc/                  # Quality reports for each sample
+│   ├── fastqc_trimmed/          # Quality reports after trimming
+│   ├── trimming_reports/        # Trim Galore reports
+│   └── multiqc_report.html      # Summary QC report (open in browser)
+├── trimmed_reads/               # Cleaned FASTQ files
+├── vast_alignment/              # VAST-tools alignment outputs
+├── inclusion_tables/            # ⭐ Main results: splicing quantification tables
+├── compare_results/             # 🔬 Differential splicing results (if groups defined)
 │   └── compare_groupA_vs_groupB/
-├── matt_references/         # Downloaded GTF and FASTA files for MATT
-└── matt_analysis/           # 🧬 MATT feature analysis results
+├── betas_analysis/              # 📈 betAS simulation-based analysis
+│   ├── betas_filtered_events.RData    # Filtered splicing events
+│   ├── betas_filtering_summary.txt    # Filtering statistics
+│   └── groupA_vs_groupB/              # Per-comparison results
+│       ├── betas_*_results.csv        # Full results table
+│       └── betas_*_summary.txt        # Comparison summary
+├── matt_references/             # Downloaded GTF and FASTA files for MATT
+└── matt_analysis/               # 🧬 MATT feature analysis results
     └── groupA_vs_groupB/
-        ├── input/           # Prepared input tables for MATT
-        ├── exons/           # Exon feature analysis (PDF report + tables)
-        └── introns/         # Intron feature analysis (PDF report + tables)
+        ├── input/               # Prepared input tables for MATT
+        ├── exons/               # Exon feature analysis (PDF report + tables)
+        └── introns/             # Intron feature analysis (PDF report + tables)
 ```
 
 ### Key Output Files
 
 | File | Description |
 |------|-------------|
+| `pipeline_summary_*.txt` | Human-readable summary of all pipeline stages |
+| `pipeline_summary_*.json` | Machine-readable summary (for automated processing) |
 | `*_INCLUSION_LEVELS_FULL-*.tab` | Main splicing quantification table (PSI values for all events) |
 | `compare_*/DiffAS-*.tab` | Differentially spliced events between groups |
+| `betas_*_results.csv` | betAS simulation results with FDR-corrected p-values |
 | `matt_analysis/*/exons/summary.pdf` | MATT exon feature comparison report with box plots |
 | `matt_analysis/*/introns/summary.pdf` | MATT intron feature comparison report with box plots |
 | `multiqc_report.html` | Summary quality control report |
+
+---
+
+## 📈 betAS Simulation-Based Analysis
+
+The pipeline includes **betAS** (beta-distribution-based Alternative Splicing) analysis, which performs simulation-based statistical testing of differential splicing. This runs automatically after VAST-tools combine when groups are defined.
+
+### What betAS Does
+
+1. **Filters events**: Only keeps events with sufficient coverage (N ≥ 10 by default)
+2. **Simulates distributions**: Uses beta distributions to model PSI uncertainty
+3. **Statistical testing**: Calculates FDR-corrected p-values for each event
+4. **Generates results**: CSV files with dPSI, p-values, and significance calls
+
+### betAS Output Files
+
+| File | Description |
+|------|-------------|
+| `betas_filtered_events.RData` | R data object with filtered splicing events |
+| `betas_filtering_summary.txt` | Events before/after filtering, sample counts |
+| `betas_*_results.csv` | Full results table with dPSI, p-values, FDR |
+| `betas_*_summary.txt` | Summary statistics per comparison |
+
+### Customizing betAS Parameters
+
+```bash
+srun submit_nf.sh main.nf \
+    ... \
+    --betas_filter_n 15 \     # Require N ≥ 15 (stricter filtering)
+    --betas_nsim 2000 \       # More simulations (more accurate, slower)
+    --betas_npoints 1000      # More points for volcano plot
+```
+
+### Skipping betAS
+
+If you don't need simulation-based analysis, add `--skip_betas`:
+```bash
+srun submit_nf.sh main.nf \
+    ... \
+    --skip_betas
+```
+
+> **⚠️ Resource Note:** betAS simulations are memory-intensive (60GB RAM per comparison). The pipeline handles this automatically.
 
 ---
 
@@ -245,6 +305,77 @@ srun submit_nf.sh main.nf \
     ... \
     --skip_matt
 ```
+
+---
+
+## 📋 Pipeline Summary Report
+
+At the end of each run, the pipeline generates a comprehensive summary report with statistics from all stages:
+
+### Summary Contents
+
+1. **VAST-tools Alignment Statistics**
+   - Number of samples aligned
+   - Output files per sample
+
+2. **VAST-tools Combine Statistics**
+   - Total splicing events in inclusion table
+   - Event type breakdown (exon skipping, intron retention, microexons)
+
+3. **VAST-tools Compare Statistics** (if groups defined)
+   - Differential events per comparison
+   - Up/down-regulated event counts
+
+4. **betAS Analysis Statistics** (if enabled)
+   - Events before/after filtering
+   - Significant events (FDR < 0.05) per comparison
+   - Processing time
+
+### Output Files
+
+- `pipeline_summary_{project_name}.txt` - Human-readable text summary
+- `pipeline_summary_{project_name}.json` - Machine-readable JSON (for scripts/automation)
+
+---
+
+## 🗂️ How the Pipeline Organizes Results
+
+The pipeline uses the `--outdir` parameter (default: `nextflow_results/`) to determine where all results are saved. Each process specifies its output location using `publishDir`:
+
+```groovy
+publishDir "${params.outdir}/inclusion_tables", mode: 'copy'
+```
+
+### Output Directory Structure
+
+| Parameter | Controls | Default |
+|-----------|----------|---------|
+| `--outdir` | Base output directory | `nextflow_results/` |
+| `--project_name` | Names output files | `oocyte_splicing_analysis` |
+
+### How Results Are Organized
+
+1. **QC reports** → `{outdir}/qc/`
+2. **Trimmed reads** → `{outdir}/trimmed_reads/`
+3. **Alignments** → `{outdir}/vast_alignment/`
+4. **Inclusion tables** → `{outdir}/inclusion_tables/`
+5. **Compare results** → `{outdir}/compare_results/`
+6. **betAS results** → `{outdir}/betas_analysis/`
+7. **MATT results** → `{outdir}/matt_analysis/`
+8. **Summary** → `{outdir}/pipeline_summary_*.{txt,json}`
+
+### Customizing Output Location
+
+```bash
+srun submit_nf.sh main.nf \
+    ... \
+    --outdir /users/me/projects/my_analysis/results/ \
+    --project_name taxol_splicing_2026
+```
+
+This would create:
+- `/users/me/projects/my_analysis/results/inclusion_tables/taxol_splicing_2026_INCLUSION_LEVELS_FULL-hg38.tab`
+- `/users/me/projects/my_analysis/results/pipeline_summary_taxol_splicing_2026.txt`
 
 ---
 
