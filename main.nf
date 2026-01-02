@@ -316,7 +316,8 @@ process run_trim_galore {
     errorStrategy { task.attempt <= maxRetries ? 'retry' : 'terminate' }
 
     // Resource requirements - scale memory with retry attempts for large files
-    cpus 2
+    // trim_galore uses cutadapt which scales well up to 4 cores
+    cpus 4
     memory { 32.GB * task.attempt }
     time { 2.hours * task.attempt }
 
@@ -650,10 +651,10 @@ process combine_results {
         }
     }
 
-    // Increase resources to handle larger datasets
-    cpus 8
+    // Resource requirements - combine is mostly I/O bound, not heavily CPU dependent
+    cpus 4
     memory { 64.GB }
-    time { 6.hours }  // Increase time limit to 6 hours
+    time { 6.hours }
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
