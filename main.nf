@@ -463,7 +463,7 @@ process align_reads {
 
     // Resource requirements
     cpus 8
-    memory { 20.GB }
+    memory { 30.GB * task.attempt}
     time { 10.hours }
 
     input:
