@@ -299,10 +299,14 @@ process run_trim_galore {
     publishDir "${params.outdir}/qc/fastqc_trimmed", mode: 'copy', pattern: "*_fastqc.{html,zip}"
     container 'https://depot.galaxyproject.org/singularity/trim-galore:0.6.9--hdfd78af_0' // Using galaxyproject container for trim_galore
 
-    // Resource requirements
+    // Retry configuration for handling large files that may need more resources
+    maxRetries 3
+    errorStrategy { task.attempt <= maxRetries ? 'retry' : 'terminate' }
+
+    // Resource requirements - scale memory with retry attempts for large files
     cpus 4
-    memory { 16.GB }
-    time { 2.hours }
+    memory { 16.GB * task.attempt }
+    time { 2.hours * task.attempt }
 
     input:
     tuple val(sample_id), val(sample_type), path(fastq_files), val(group)
