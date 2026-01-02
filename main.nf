@@ -1098,11 +1098,8 @@ process run_matt_exons {
     path "matt_exons_${group_a}_vs_${group_b}/*", emit: exon_results, optional: true
 
     script:
-    def matt_species = [
-        'hg19': 'Hsap', 'hg38': 'Hsap',
-        'mm9': 'Mmus', 'mm10': 'Mmus',
-        'rn6': 'Rnor', 'dm6': 'Dmel'
-    ][species] ?: 'Hsap'
+    def matt_map = ['hg19': 'Hsap', 'hg38': 'Hsap', 'mm9': 'Mmus', 'mm10': 'Mmus', 'rn6': 'Rnor', 'dm6': 'Dmel']
+    def matt_species = matt_map.containsKey(species) ? matt_map[species] : 'Hsap'
 
     """
     echo "Running MATT cmpr_exons for ${group_a} vs ${group_b}"
@@ -1159,11 +1156,8 @@ process run_matt_introns {
     path "matt_introns_${group_a}_vs_${group_b}/*", emit: intron_results, optional: true
 
     script:
-    def matt_species = [
-        'hg19': 'Hsap', 'hg38': 'Hsap',
-        'mm9': 'Mmus', 'mm10': 'Mmus',
-        'rn6': 'Rnor', 'dm6': 'Dmel'
-    ][species] ?: 'Hsap'
+    def matt_map = ['hg19': 'Hsap', 'hg38': 'Hsap', 'mm9': 'Mmus', 'mm10': 'Mmus', 'rn6': 'Rnor', 'dm6': 'Dmel']
+    def matt_species = matt_map.containsKey(species) ? matt_map[species] : 'Hsap'
 
     """
     echo "Running MATT cmpr_introns for ${group_a} vs ${group_b}"
