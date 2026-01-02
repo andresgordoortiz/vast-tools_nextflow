@@ -304,8 +304,8 @@ process run_trim_galore {
     errorStrategy { task.attempt <= maxRetries ? 'retry' : 'terminate' }
 
     // Resource requirements - scale memory with retry attempts for large files
-    cpus 4
-    memory { 16.GB * task.attempt }
+    cpus 2
+    memory { 32.GB * task.attempt }
     time { 2.hours * task.attempt }
 
     input:
