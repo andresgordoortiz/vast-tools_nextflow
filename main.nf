@@ -40,6 +40,12 @@ params.min_range = 5  // Minimum range for vast-tools compare
 params.skip_matt = false  // Skip MATT feature analysis (requires compare to run)
 params.matt_intron_length = 150  // Length of intronic region to search for SF1 hits
 
+// betAS analysis parameters
+params.skip_betas = false  // Skip betAS simulation-based splicing analysis
+params.betas_filter_n = 10  // Minimum N for filtering events in betAS
+params.betas_nsim = 1000  // Number of simulations for betAS analysis
+params.betas_npoints = 500  // Number of points for volcano plot preparation
+
 // Display help message
 def helpMessage() {
     log.info"""
@@ -83,6 +89,12 @@ def helpMessage() {
     MATT Feature Analysis Arguments:
       --skip_matt           Skip MATT feature analysis (default: ${params.skip_matt})
       --matt_intron_length  Intronic region length for SF1 search (default: ${params.matt_intron_length})
+
+    betAS Simulation Analysis Arguments:
+      --skip_betas          Skip betAS simulation-based splicing analysis (default: ${params.skip_betas})
+      --betas_filter_n      Minimum N for filtering events (default: ${params.betas_filter_n})
+      --betas_nsim          Number of simulations (default: ${params.betas_nsim})
+      --betas_npoints       Number of points for volcano plot (default: ${params.betas_npoints})
 
     Note: If your sample CSV contains a 'group' column with 2+ groups, the pipeline
     will automatically run vast-tools compare for all pairwise group comparisons.
@@ -1198,6 +1210,271 @@ process run_matt_introns {
     """
 }
 
+// Process to filter inclusion table and prepare betAS data object
+process prepare_betas_data {
+    tag "betAS data preparation"
+    label 'process_high'
+    publishDir "${params.outdir}/betas_analysis", mode: 'copy'
+    container 'andresgordoortiz/splicing_analysis_r_crg:v1.5'
+
+    // Resource requirements - betAS filtering is memory intensive
+    cpus 2
+    memory { 16.GB }
+    time { 1.hours }
+
+    input:
+    path inclusion_table
+    val species
+    val filter_n
+
+    output:
+    path "betas_filtered_events.RData", emit: betas_data
+    path "betas_filtering_summary.txt", emit: summary
+
+    script:
+    """
+    #!/usr/bin/env Rscript
+
+    # Load required libraries
+    library(betAS)
+
+    # Log start
+    cat("Starting betAS data preparation\\n")
+    cat("Inclusion table:", "${inclusion_table}", "\\n")
+    cat("Species:", "${species}", "\\n")
+    cat("Filter N:", ${filter_n}, "\\n")
+
+    # Load and filter data using betAS
+    cat("Loading splicing data...\\n")
+    splicing_data <- getDataset(
+        pathTables = "${inclusion_table}",
+        tool = "vast-tools"
+    )
+
+    cat("Extracting events...\\n")
+    splicing_events_raw <- getEvents(splicing_data, tool = "vast-tools")
+
+    cat("Filtering events with N >= ${filter_n}...\\n")
+    splicing_events <- filterEvents(splicing_events_raw, N = ${filter_n})
+
+    # Summary statistics
+    n_events_raw <- nrow(splicing_events_raw\$PSI)
+    n_events_filtered <- nrow(splicing_events\$PSI)
+    n_samples <- ncol(splicing_events\$PSI)
+
+    cat("\\n=== Filtering Summary ===\\n")
+    cat("Total events before filtering:", n_events_raw, "\\n")
+    cat("Events after filtering (N >=", ${filter_n}, "):", n_events_filtered, "\\n")
+    cat("Number of samples:", n_samples, "\\n")
+    cat("Sample names:", paste(colnames(splicing_events\$PSI), collapse = ", "), "\\n")
+
+    # Save filtered data
+    cat("\\nSaving filtered betAS data...\\n")
+    save(splicing_events, file = "betas_filtered_events.RData")
+
+    # Write summary file
+    summary_text <- paste0(
+        "betAS Filtering Summary\\n",
+        "=======================\\n",
+        "Input file: ${inclusion_table}\\n",
+        "Species: ${species}\\n",
+        "Filter threshold (N): ${filter_n}\\n",
+        "\\n",
+        "Results:\\n",
+        "- Events before filtering: ", n_events_raw, "\\n",
+        "- Events after filtering: ", n_events_filtered, "\\n",
+        "- Number of samples: ", n_samples, "\\n",
+        "- Sample names: ", paste(colnames(splicing_events\$PSI), collapse = ", "), "\\n"
+    )
+    writeLines(summary_text, "betas_filtering_summary.txt")
+
+    cat("✓ betAS data preparation complete\\n")
+    """
+}
+
+// Process to run betAS simulation for a group comparison
+process run_betas_simulation {
+    tag "betAS simulation: ${group_a} vs ${group_b}"
+    label 'process_high'
+    publishDir "${params.outdir}/betas_analysis/${group_a}_vs_${group_b}", mode: 'copy'
+    container 'andresgordoortiz/splicing_analysis_r_crg:v1.5'
+
+    // Resource requirements - simulations are very memory intensive
+    cpus 2
+    memory { 60.GB }
+    time { 72.hours }
+
+    input:
+    path betas_data
+    val group_a
+    val group_b
+    val samples_a
+    val samples_b
+    val nsim
+    val npoints
+
+    output:
+    path "betas_${group_a}_vs_${group_b}_results.csv", emit: results
+    path "betas_${group_a}_vs_${group_b}_summary.txt", emit: summary
+
+    script:
+    def samples_a_r = samples_a.collect { "\"${it}\"" }.join(', ')
+    def samples_b_r = samples_b.collect { "\"${it}\"" }.join(', ')
+    """
+    #!/usr/bin/env Rscript
+
+    # Load required libraries
+    library(betAS)
+
+    # Log start
+    cat("Starting betAS simulation analysis\\n")
+    cat("Comparison: ${group_a} vs ${group_b}\\n")
+    cat("Samples in ${group_a}:", "${samples_a.join(', ')}", "\\n")
+    cat("Samples in ${group_b}:", "${samples_b.join(', ')}", "\\n")
+    cat("Number of simulations:", ${nsim}, "\\n")
+    cat("Number of points:", ${npoints}, "\\n")
+
+    # Load filtered betAS data
+    cat("\\nLoading filtered betAS data...\\n")
+    load("${betas_data}")
+
+    # Get sample names from the data
+    all_samples <- colnames(splicing_events\$PSI)
+    cat("Available samples in data:", paste(all_samples, collapse = ", "), "\\n")
+
+    # Define sample groups
+    samples_group_a <- c(${samples_a_r})
+    samples_group_b <- c(${samples_b_r})
+
+    cat("\\nLooking for group A samples:", paste(samples_group_a, collapse = ", "), "\\n")
+    cat("Looking for group B samples:", paste(samples_group_b, collapse = ", "), "\\n")
+
+    # Find matching columns (handle potential naming differences)
+    find_matching_cols <- function(sample_names, all_cols) {
+        matched <- c()
+        for (s in sample_names) {
+            # Try exact match first
+            if (s %in% all_cols) {
+                matched <- c(matched, which(all_cols == s))
+            } else {
+                # Try partial match (sample name might be part of column name)
+                partial <- grep(s, all_cols, fixed = TRUE)
+                if (length(partial) > 0) {
+                    matched <- c(matched, partial[1])
+                }
+            }
+        }
+        return(unique(matched))
+    }
+
+    colsA <- find_matching_cols(samples_group_a, all_samples)
+    colsB <- find_matching_cols(samples_group_b, all_samples)
+
+    cat("\\nMatched column indices for ${group_a}:", paste(colsA, collapse = ", "), "\\n")
+    cat("Matched column indices for ${group_b}:", paste(colsB, collapse = ", "), "\\n")
+    cat("Matched samples for ${group_a}:", paste(all_samples[colsA], collapse = ", "), "\\n")
+    cat("Matched samples for ${group_b}:", paste(all_samples[colsB], collapse = ", "), "\\n")
+
+    # Check if we found samples
+    if (length(colsA) == 0 || length(colsB) == 0) {
+        cat("\\nERROR: Could not find matching samples for one or both groups\\n")
+        cat("Creating empty results file...\\n")
+
+        # Create empty results
+        empty_df <- data.frame(
+            Error = "No matching samples found",
+            Group_A = "${group_a}",
+            Group_B = "${group_b}",
+            Samples_A_requested = paste(samples_group_a, collapse = ", "),
+            Samples_B_requested = paste(samples_group_b, collapse = ", "),
+            Available_samples = paste(all_samples, collapse = ", ")
+        )
+        write.csv(empty_df, "betas_${group_a}_vs_${group_b}_results.csv", row.names = FALSE)
+
+        summary_text <- paste0(
+            "betAS Simulation Summary - ERROR\\n",
+            "================================\\n",
+            "Comparison: ${group_a} vs ${group_b}\\n",
+            "Error: Could not find matching samples\\n",
+            "Requested ${group_a} samples: ", paste(samples_group_a, collapse = ", "), "\\n",
+            "Requested ${group_b} samples: ", paste(samples_group_b, collapse = ", "), "\\n",
+            "Available samples: ", paste(all_samples, collapse = ", "), "\\n"
+        )
+        writeLines(summary_text, "betas_${group_a}_vs_${group_b}_summary.txt")
+        quit(status = 0)
+    }
+
+    # Set seed for reproducibility
+    set.seed(42)
+    cat("\\nSeed set to 42 for reproducible simulations\\n")
+
+    # Run betAS simulation
+    cat("\\nRunning betAS simulation (this may take a while)...\\n")
+    cat("Using", ${nsim}, "simulations and", ${npoints}, "points\\n")
+
+    start_time <- Sys.time()
+
+    splicing_betAS_df <- prepareTableVolcanoFDR(
+        psitable = splicing_events\$PSI,
+        qualtable = splicing_events\$Qual,
+        npoints = ${npoints},
+        colsA = colsA,
+        colsB = colsB,
+        labA = "${group_a}",
+        labB = "${group_b}",
+        basalColor = "#89C0AE",
+        interestColor = "#E69A9C",
+        maxDevTable = maxDevSimulationN100,
+        nsim = ${nsim},
+        seed = TRUE,
+        CoverageWeight = FALSE
+    )
+
+    end_time <- Sys.time()
+    elapsed <- difftime(end_time, start_time, units = "hours")
+
+    cat("\\nSimulation completed in", round(as.numeric(elapsed), 2), "hours\\n")
+
+    # Save results
+    cat("\\nSaving results...\\n")
+    write.csv(splicing_betAS_df, "betas_${group_a}_vs_${group_b}_results.csv", row.names = TRUE)
+
+    # Calculate summary statistics
+    n_events <- nrow(splicing_betAS_df)
+    n_significant <- if ("FDR" %in% colnames(splicing_betAS_df)) {
+        sum(splicing_betAS_df\$FDR < 0.05, na.rm = TRUE)
+    } else if ("pval" %in% colnames(splicing_betAS_df)) {
+        sum(splicing_betAS_df\$pval < 0.05, na.rm = TRUE)
+    } else {
+        NA
+    }
+
+    # Write summary
+    summary_text <- paste0(
+        "betAS Simulation Summary\\n",
+        "========================\\n",
+        "Comparison: ${group_a} vs ${group_b}\\n",
+        "\\n",
+        "Parameters:\\n",
+        "- Number of simulations: ${nsim}\\n",
+        "- Number of points: ${npoints}\\n",
+        "- Seed: 42\\n",
+        "\\n",
+        "Samples:\\n",
+        "- ${group_a} (n=", length(colsA), "): ", paste(all_samples[colsA], collapse = ", "), "\\n",
+        "- ${group_b} (n=", length(colsB), "): ", paste(all_samples[colsB], collapse = ", "), "\\n",
+        "\\n",
+        "Results:\\n",
+        "- Total events analyzed: ", n_events, "\\n",
+        "- Significant events (FDR < 0.05): ", n_significant, "\\n",
+        "- Processing time: ", round(as.numeric(elapsed), 2), " hours\\n"
+    )
+    writeLines(summary_text, "betas_${group_a}_vs_${group_b}_summary.txt")
+
+    cat("\\n✓ betAS simulation complete for ${group_a} vs ${group_b}\\n")
+    """
+}
+
 process run_rmarkdown_report {
     tag "Generate R analysis report"
     label 'process_high'
@@ -1455,6 +1732,10 @@ workflow {
       - Min Range:         ${params.min_range}
       - Skip MATT:         ${params.skip_matt}
       - MATT intron length: ${params.matt_intron_length}
+      - Skip betAS:        ${params.skip_betas}
+      - betAS filter N:    ${params.betas_filter_n}
+      - betAS simulations: ${params.betas_nsim}
+      - betAS npoints:     ${params.betas_npoints}
     """
 
     // Prepare VASTDB - now just validates paths
@@ -1535,6 +1816,52 @@ workflow {
 
     // RMarkdown report generation is deprecated/disabled
     // To re-enable in the future, set params.skip_rmarkdown = false
+
+    // Run betAS simulation-based splicing analysis if not skipped
+    // This runs independently after vast-tools combine, doesn't require compare
+    if (!params.skip_betas) {
+        // Parse groups from CSV file for betAS
+        def groupInfoBetas = parseGroupsFromCsv(params.sample_csv)
+        def groupsBetas = groupInfoBetas.groups
+        def has_paired_betas = groupInfoBetas.has_paired
+
+        if (groupsBetas.size() >= 2) {
+            log.info "betAS analysis enabled - preparing filtered data..."
+            log.info "Found ${groupsBetas.size()} groups for betAS analysis: ${groupsBetas.keySet().join(', ')}"
+
+            // Generate pairwise comparisons for betAS
+            def comparisonsBetas = generatePairwiseComparisons(groupsBetas, has_paired_betas)
+            log.info "Will run ${comparisonsBetas.size()} betAS simulation(s)"
+
+            // First, prepare the betAS filtered data object from the inclusion table
+            betas_data = prepare_betas_data(
+                inclusion_table,
+                params.species,
+                params.betas_filter_n
+            )
+
+            // Create channel for betAS simulations from comparisons
+            betas_channel = Channel.from(comparisonsBetas)
+                .combine(betas_data.betas_data)
+
+            // Run betAS simulation for each pairwise comparison
+            betas_results = run_betas_simulation(
+                betas_channel.map { it[1] },           // betas_data RData file
+                betas_channel.map { it[0].group_a },
+                betas_channel.map { it[0].group_b },
+                betas_channel.map { it[0].samples_a },
+                betas_channel.map { it[0].samples_b },
+                params.betas_nsim,
+                params.betas_npoints
+            )
+
+            log.info "betAS simulation jobs submitted"
+        } else {
+            log.info "Skipping betAS analysis: Need at least 2 groups, found ${groupsBetas.size()}"
+        }
+    } else {
+        log.info "Skipping betAS analysis as per user request."
+    }
 
     // Run vast-tools compare for pairwise group comparisons if groups are defined
     if (!params.skip_compare) {
