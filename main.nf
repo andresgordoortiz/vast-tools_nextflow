@@ -1475,6 +1475,295 @@ process run_betas_simulation {
     """
 }
 
+// Process to generate pipeline execution summary
+process generate_pipeline_summary {
+    tag "Pipeline Summary"
+    label 'process_low'
+    publishDir "${params.outdir}", mode: 'copy'
+
+    // Resource requirements
+    cpus 1
+    memory { 2.GB }
+    time { 30.min }
+
+    input:
+    path inclusion_table
+    path vast_dirs, stageAs: "vast_out_*"
+    val project_name
+    val species
+    val outdir
+
+    output:
+    path "pipeline_summary_${project_name}.txt", emit: summary_txt
+    path "pipeline_summary_${project_name}.json", emit: summary_json
+
+    script:
+    """
+    #!/bin/bash
+    set -e
+
+    echo "Generating pipeline execution summary..."
+
+    # Initialize summary file
+    SUMMARY_FILE="pipeline_summary_${project_name}.txt"
+    JSON_FILE="pipeline_summary_${project_name}.json"
+
+    # Header
+    cat > \$SUMMARY_FILE << 'HEADER'
+================================================================================
+                    VAST-TOOLS SPLICING ANALYSIS PIPELINE SUMMARY
+================================================================================
+HEADER
+
+    echo "Project: ${project_name}" >> \$SUMMARY_FILE
+    echo "Species: ${species}" >> \$SUMMARY_FILE
+    echo "Generated: \$(date)" >> \$SUMMARY_FILE
+    echo "" >> \$SUMMARY_FILE
+
+    # Initialize JSON
+    echo "{" > \$JSON_FILE
+    echo "  \"project\": \"${project_name}\"," >> \$JSON_FILE
+    echo "  \"species\": \"${species}\"," >> \$JSON_FILE
+    echo "  \"timestamp\": \"\$(date -Iseconds)\"," >> \$JSON_FILE
+
+    # ============================================================
+    # 1. VAST-TOOLS ALIGN STATISTICS
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "1. VAST-TOOLS ALIGNMENT STATISTICS" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    echo "  \"alignment\": {" >> \$JSON_FILE
+    echo "    \"samples\": [" >> \$JSON_FILE
+
+    SAMPLE_COUNT=0
+    FIRST_SAMPLE=true
+    for vast_dir in vast_out_*; do
+        if [ -d "\$vast_dir" ]; then
+            SAMPLE_COUNT=\$((SAMPLE_COUNT + 1))
+            SAMPLE_NAME=\$(basename "\$vast_dir" | sed 's/vast_out_//')
+
+            # Count files in to_combine as a proxy for successful alignment
+            TO_COMBINE_FILES=0
+            if [ -d "\$vast_dir/to_combine" ]; then
+                TO_COMBINE_FILES=\$(find "\$vast_dir/to_combine" -type f | wc -l)
+            fi
+
+            echo "  Sample: \$SAMPLE_NAME" >> \$SUMMARY_FILE
+            echo "    - Output files in to_combine: \$TO_COMBINE_FILES" >> \$SUMMARY_FILE
+
+            # JSON entry
+            if [ "\$FIRST_SAMPLE" = "false" ]; then
+                echo "," >> \$JSON_FILE
+            fi
+            FIRST_SAMPLE=false
+            echo -n "      {\"name\": \"\$SAMPLE_NAME\", \"output_files\": \$TO_COMBINE_FILES}" >> \$JSON_FILE
+        fi
+    done
+
+    echo "" >> \$JSON_FILE
+    echo "    ]," >> \$JSON_FILE
+    echo "    \"total_samples\": \$SAMPLE_COUNT" >> \$JSON_FILE
+    echo "  }," >> \$JSON_FILE
+
+    echo "" >> \$SUMMARY_FILE
+    echo "  Total samples aligned: \$SAMPLE_COUNT" >> \$SUMMARY_FILE
+    echo "" >> \$SUMMARY_FILE
+
+    # ============================================================
+    # 2. VAST-TOOLS COMBINE STATISTICS
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "2. VAST-TOOLS COMBINE STATISTICS" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    if [ -f "${inclusion_table}" ]; then
+        # Count total events (excluding header)
+        TOTAL_EVENTS=\$(tail -n +2 "${inclusion_table}" | wc -l)
+
+        # Count samples (columns after the first few metadata columns)
+        HEADER_LINE=\$(head -1 "${inclusion_table}")
+        TOTAL_COLUMNS=\$(echo "\$HEADER_LINE" | awk -F'\\t' '{print NF}')
+
+        # Count event types if possible
+        EXON_EVENTS=\$(grep -c "EX\\|Alt\\|ALTA\\|ALTD" "${inclusion_table}" 2>/dev/null || echo "N/A")
+        IR_EVENTS=\$(grep -c "^IR\\|\\tIR" "${inclusion_table}" 2>/dev/null || echo "N/A")
+        MIC_EVENTS=\$(grep -c "MIC" "${inclusion_table}" 2>/dev/null || echo "N/A")
+
+        echo "  Inclusion table: ${inclusion_table}" >> \$SUMMARY_FILE
+        echo "  Total splicing events: \$TOTAL_EVENTS" >> \$SUMMARY_FILE
+        echo "  Total columns: \$TOTAL_COLUMNS" >> \$SUMMARY_FILE
+        echo "" >> \$SUMMARY_FILE
+        echo "  Event type estimates:" >> \$SUMMARY_FILE
+        echo "    - Exon skipping (EX/Alt): ~\$EXON_EVENTS" >> \$SUMMARY_FILE
+        echo "    - Intron retention (IR): ~\$IR_EVENTS" >> \$SUMMARY_FILE
+        echo "    - Microexons (MIC): ~\$MIC_EVENTS" >> \$SUMMARY_FILE
+
+        echo "  \"combine\": {" >> \$JSON_FILE
+        echo "    \"inclusion_table\": \"${inclusion_table}\"," >> \$JSON_FILE
+        echo "    \"total_events\": \$TOTAL_EVENTS," >> \$JSON_FILE
+        echo "    \"total_columns\": \$TOTAL_COLUMNS" >> \$JSON_FILE
+        echo "  }," >> \$JSON_FILE
+    else
+        echo "  WARNING: Inclusion table not found!" >> \$SUMMARY_FILE
+        echo "  \"combine\": {\"error\": \"inclusion table not found\"}," >> \$JSON_FILE
+    fi
+    echo "" >> \$SUMMARY_FILE
+
+    # ============================================================
+    # 3. VAST-TOOLS COMPARE STATISTICS (scan output directory)
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "3. VAST-TOOLS COMPARE STATISTICS (Differential Splicing)" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    echo "  \"compare\": [" >> \$JSON_FILE
+    FIRST_COMPARE=true
+    COMPARE_COUNT=0
+
+    # Look for compare results in the output directory
+    if [ -d "${outdir}/compare_results" ]; then
+        for compare_dir in ${outdir}/compare_results/compare_*; do
+            if [ -d "\$compare_dir" ]; then
+                COMPARE_COUNT=\$((COMPARE_COUNT + 1))
+                COMPARISON_NAME=\$(basename "\$compare_dir" | sed 's/compare_//')
+
+                # Find diff files and count significant events
+                DIFF_FILE=\$(find "\$compare_dir" -name "*.tab" -type f 2>/dev/null | head -1)
+                DIFF_EVENTS="N/A"
+                UP_EVENTS="N/A"
+                DOWN_EVENTS="N/A"
+
+                if [ -n "\$DIFF_FILE" ] && [ -f "\$DIFF_FILE" ]; then
+                    DIFF_EVENTS=\$(tail -n +2 "\$DIFF_FILE" | wc -l)
+                    UP_EVENTS=\$(awk -F'\\t' 'NR>1 && \$NF > 0 {count++} END {print count+0}' "\$DIFF_FILE" 2>/dev/null || echo "N/A")
+                    DOWN_EVENTS=\$(awk -F'\\t' 'NR>1 && \$NF < 0 {count++} END {print count+0}' "\$DIFF_FILE" 2>/dev/null || echo "N/A")
+                fi
+
+                echo "  Comparison: \$COMPARISON_NAME" >> \$SUMMARY_FILE
+                echo "    - Differential events: \$DIFF_EVENTS" >> \$SUMMARY_FILE
+                echo "    - Up-regulated (dPSI > 0): \$UP_EVENTS" >> \$SUMMARY_FILE
+                echo "    - Down-regulated (dPSI < 0): \$DOWN_EVENTS" >> \$SUMMARY_FILE
+                echo "" >> \$SUMMARY_FILE
+
+                if [ "\$FIRST_COMPARE" = "false" ]; then
+                    echo "," >> \$JSON_FILE
+                fi
+                FIRST_COMPARE=false
+                echo -n "    {\"comparison\": \"\$COMPARISON_NAME\", \"diff_events\": \"\$DIFF_EVENTS\", \"up\": \"\$UP_EVENTS\", \"down\": \"\$DOWN_EVENTS\"}" >> \$JSON_FILE
+            fi
+        done
+    fi
+
+    if [ \$COMPARE_COUNT -eq 0 ]; then
+        echo "  No comparisons performed (skipped or no groups defined)" >> \$SUMMARY_FILE
+    fi
+
+    echo "" >> \$JSON_FILE
+    echo "  ]," >> \$JSON_FILE
+
+    # ============================================================
+    # 4. betAS ANALYSIS STATISTICS (scan output directory)
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "4. betAS SIMULATION-BASED ANALYSIS STATISTICS" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    echo "  \"betas\": {" >> \$JSON_FILE
+
+    # Look for betAS filtering summary
+    FILTER_SUMMARY="${outdir}/betas_analysis/betas_filtering_summary.txt"
+    if [ -f "\$FILTER_SUMMARY" ]; then
+        echo "  Data Filtering:" >> \$SUMMARY_FILE
+        grep -E "Events|samples|threshold" "\$FILTER_SUMMARY" 2>/dev/null | sed 's/^/    /' >> \$SUMMARY_FILE || true
+        echo "" >> \$SUMMARY_FILE
+
+        EVENTS_BEFORE=\$(grep "before filtering" "\$FILTER_SUMMARY" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+        EVENTS_AFTER=\$(grep "after filtering" "\$FILTER_SUMMARY" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+        N_SAMPLES=\$(grep "Number of samples" "\$FILTER_SUMMARY" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+
+        echo "    \"filtering\": {" >> \$JSON_FILE
+        echo "      \"events_before\": \"\$EVENTS_BEFORE\"," >> \$JSON_FILE
+        echo "      \"events_after\": \"\$EVENTS_AFTER\"," >> \$JSON_FILE
+        echo "      \"samples\": \"\$N_SAMPLES\"" >> \$JSON_FILE
+        echo "    }," >> \$JSON_FILE
+    else
+        echo "  No betAS filtering data found (analysis may be skipped or pending)" >> \$SUMMARY_FILE
+        echo "    \"filtering\": null," >> \$JSON_FILE
+    fi
+
+    echo "    \"simulations\": [" >> \$JSON_FILE
+    FIRST_BETAS=true
+    BETAS_COUNT=0
+
+    # Look for betAS simulation summaries in output directory
+    if [ -d "${outdir}/betas_analysis" ]; then
+        for betas_dir in ${outdir}/betas_analysis/*/; do
+            if [ -d "\$betas_dir" ]; then
+                BETAS_SUMMARY="\${betas_dir}betas_*_summary.txt"
+                for summary_file in \$BETAS_SUMMARY; do
+                    if [ -f "\$summary_file" ]; then
+                        BETAS_COUNT=\$((BETAS_COUNT + 1))
+                        COMPARISON_NAME=\$(basename "\$(dirname "\$summary_file")")
+
+                        echo "  Simulation: \$COMPARISON_NAME" >> \$SUMMARY_FILE
+
+                        if grep -q "ERROR" "\$summary_file" 2>/dev/null; then
+                            echo "    - Status: ERROR (see details in output file)" >> \$SUMMARY_FILE
+                            STATUS="error"
+                            TOTAL_EVENTS="N/A"
+                            SIG_EVENTS="N/A"
+                        else
+                            STATUS="completed"
+                            TOTAL_EVENTS=\$(grep "Total events" "\$summary_file" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+                            SIG_EVENTS=\$(grep "Significant events" "\$summary_file" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+                            PROC_TIME=\$(grep "Processing time" "\$summary_file" 2>/dev/null | grep -oE '[0-9.]+' | tail -1 || echo "N/A")
+
+                            echo "    - Status: Completed" >> \$SUMMARY_FILE
+                            echo "    - Total events analyzed: \$TOTAL_EVENTS" >> \$SUMMARY_FILE
+                            echo "    - Significant events (FDR < 0.05): \$SIG_EVENTS" >> \$SUMMARY_FILE
+                            echo "    - Processing time: \$PROC_TIME hours" >> \$SUMMARY_FILE
+                        fi
+                        echo "" >> \$SUMMARY_FILE
+
+                        if [ "\$FIRST_BETAS" = "false" ]; then
+                            echo "," >> \$JSON_FILE
+                        fi
+                        FIRST_BETAS=false
+                        echo -n "      {\"comparison\": \"\$COMPARISON_NAME\", \"status\": \"\$STATUS\", \"total_events\": \"\$TOTAL_EVENTS\", \"significant_events\": \"\$SIG_EVENTS\"}" >> \$JSON_FILE
+                    fi
+                done
+            fi
+        done
+    fi
+
+    if [ \$BETAS_COUNT -eq 0 ]; then
+        echo "  No betAS simulations found (analysis may be skipped or pending)" >> \$SUMMARY_FILE
+    fi
+
+    echo "" >> \$JSON_FILE
+    echo "    ]" >> \$JSON_FILE
+    echo "  }" >> \$JSON_FILE
+
+    # Close JSON
+    echo "}" >> \$JSON_FILE
+
+    # ============================================================
+    # FOOTER
+    # ============================================================
+    echo "" >> \$SUMMARY_FILE
+    echo "================================================================================" >> \$SUMMARY_FILE
+    echo "                              END OF SUMMARY" >> \$SUMMARY_FILE
+    echo "================================================================================" >> \$SUMMARY_FILE
+
+    echo ""
+    echo "✓ Pipeline summary generated:"
+    echo "  - Text: \$SUMMARY_FILE"
+    echo "  - JSON: \$JSON_FILE"
+    cat \$SUMMARY_FILE
+    """
+}
+
 process run_rmarkdown_report {
     tag "Generate R analysis report"
     label 'process_high'
@@ -1933,4 +2222,20 @@ workflow {
     } else {
         log.info "Skipping vast-tools compare as per user request."
     }
+
+    // ============================================================
+    // PIPELINE SUMMARY - Collect all outputs and generate report
+    // ============================================================
+
+    // Collect vast alignment directories (always available)
+    vast_dirs_for_summary = align_results.vast_out_dir.collect()
+
+    // Generate pipeline summary - scans output directory for compare and betAS results
+    generate_pipeline_summary(
+        inclusion_table,
+        vast_dirs_for_summary,
+        params.project_name,
+        params.species,
+        params.outdir
+    )
 }
