@@ -1601,3 +1601,5 @@ workflow {
         }
     } else {
         log.info "Skipping vast-tools compare as per user request."
+    }
+}
