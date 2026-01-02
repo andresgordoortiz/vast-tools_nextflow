@@ -890,24 +890,26 @@ process download_matt_references {
     tuple val(species), path("*.gtf"), path("*.fa"), emit: references
 
     script:
-    // Map species to Ensembl release and assembly
-    def ensembl_info = [
-        'hg19': [release: '75', assembly: 'GRCh37', species_name: 'homo_sapiens', matt_code: 'Hsap'],
-        'hg38': [release: '110', assembly: 'GRCh38', species_name: 'homo_sapiens', matt_code: 'Hsap'],
-        'mm9':  [release: '67', assembly: 'NCBIM37', species_name: 'mus_musculus', matt_code: 'Mmus'],
-        'mm10': [release: '102', assembly: 'GRCm38', species_name: 'mus_musculus', matt_code: 'Mmus'],
-        'rn6':  [release: '104', assembly: 'Rnor_6.0', species_name: 'rattus_norvegicus', matt_code: 'Rnor'],
-        'dm6':  [release: '104', assembly: 'BDGP6.32', species_name: 'drosophila_melanogaster', matt_code: 'Dmel']
+    // Map species to Ensembl release and assembly - use simple strings to avoid parsing issues
+    def species_data = [
+        'hg19': ['75', 'GRCh37', 'homo_sapiens', 'Homo_sapiens'],
+        'hg38': ['110', 'GRCh38', 'homo_sapiens', 'Homo_sapiens'],
+        'mm9':  ['67', 'NCBIM37', 'mus_musculus', 'Mus_musculus'],
+        'mm10': ['102', 'GRCm38', 'mus_musculus', 'Mus_musculus'],
+        'rn6':  ['104', 'Rnor_6.0', 'rattus_norvegicus', 'Rattus_norvegicus'],
+        'dm6':  ['104', 'BDGP6.32', 'drosophila_melanogaster', 'Drosophila_melanogaster']
     ]
 
-    def info = ensembl_info[species] ?: error("Species ${species} not supported for MATT analysis. Supported: ${ensembl_info.keySet().join(', ')}")
-
-    def species_cap = info.species_name.split('_').collect { it.capitalize() }.join('_')
-    def gtf_url = "https://ftp.ensembl.org/pub/release-${info.release}/gtf/${info.species_name}/${species_cap}.${info.assembly}.${info.release}.gtf.gz"
-    def fasta_url = "https://ftp.ensembl.org/pub/release-${info.release}/fasta/${info.species_name}/dna/${species_cap}.${info.assembly}.dna.primary_assembly.fa.gz"
+    def data = species_data[species]
+    def release = data[0]
+    def assembly = data[1]
+    def species_name = data[2]
+    def species_cap = data[3]
+    def gtf_url = "https://ftp.ensembl.org/pub/release-${release}/gtf/${species_name}/${species_cap}.${assembly}.${release}.gtf.gz"
+    def fasta_url = "https://ftp.ensembl.org/pub/release-${release}/fasta/${species_name}/dna/${species_cap}.${assembly}.dna.primary_assembly.fa.gz"
 
     """
-    echo "Downloading GTF and FASTA for ${species} (Ensembl release ${info.release})..."
+    echo "Downloading GTF and FASTA for ${species} (Ensembl release ${release})..."
 
     # Download GTF
     echo "Downloading GTF from: ${gtf_url}"
