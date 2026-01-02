@@ -80,12 +80,7 @@ srun submit_nf.sh main.nf \
 | `--sample_csv` | Path to your CSV sample sheet | `/users/me/project/samples.csv` |
 | `--data_dir` | Folder containing your FASTQ files | `/users/me/project/data/` |
 | `-work-dir` | Scratch folder for temporary files (**use scratch!**) | `/nfs/scratch01/yourlab/yourname/` |
-
-### Fixed Parameters (Already Configured)
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `--vastdb_path` | `/users/mirimia/projects/vast-tools/VASTDB/` | VAST-DB database (already downloaded on cluster) |
+| `--vastdb_path` | `/users/aaljord/agordo/VASTDB/` | VAST-DB database (already downloaded on cluster) |
 | `-c` | `nextflow.config` | Pipeline config file (included in this repo) |
 
 ### Optional Parameters
@@ -116,8 +111,8 @@ srun submit_nf.sh main.nf \
 | `ce11` | C. elegans |
 
 > **📍 VAST-DB Location on CRG Cluster:**
-> The database is already available at: `/users/mirimia/projects/vast-tools/VASTDB/`
-> You don't need to download it!
+> The database is already available at: `/users/aaljord/agordo/VASTDB/`
+> Currently it olny contains the Mm10 genome build (Mm2). You may downlaod the rest from the official [vast-tools repo](https://github.com/vastgroup/vast-tools?tab=readme-ov-file#vastdb-libraries).
 
 ---
 
@@ -158,11 +153,11 @@ With 3 groups (control, treatment_A, treatment_B), the pipeline will run **3 com
 
 You can adjust the thresholds:
 ```bash
-srun submit_nf.sh main.nf \
+sbatch submit_nf.sh main.nf \
     --sample_csv /path/to/samples.csv \
     --data_dir /path/to/data/ \
-    --vastdb_path /users/mirimia/projects/vast-tools/VASTDB/ \
-    --species hg19 \
+    --vastdb_path /users/aaljord/agordo/VASTDB/ \
+    --species mm10 \
     --project_name my_project \
     --min_dPSI 15 \
     --min_range 10 \
@@ -181,24 +176,6 @@ srun submit_nf.sh main.nf \
 
 ---
 
-## 📂 Example Command (Full)
-
-Here's a complete example for a human (hg19) RNA-seq splicing analysis.
-
-**Run from the `vast-tools_nextflow/` folder:**
-
-```bash
-srun submit_nf.sh main.nf \
-    --sample_csv /users/agordo/projects/ewing_sarcoma/data/samples.csv \
-    --data_dir /users/agordo/projects/ewing_sarcoma/data/ \
-    --vastdb_path /users/mirimia/projects/vast-tools/VASTDB/ \
-    --species hg19 \
-    --project_name ewing_sarcoma_analysis \
-    -c nextflow.config \
-    -work-dir /nfs/scratch01/aaljord/agordo/
-```
-
----
 
 ## 📊 Output Files
 
