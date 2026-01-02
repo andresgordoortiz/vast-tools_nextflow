@@ -931,7 +931,7 @@ process download_matt_references {
     FASTA_URL="${fasta_url}"
     if ! wget -q "\${FASTA_URL}" -O ${species}.fa.gz 2>/dev/null; then
         echo "Primary assembly not found, trying toplevel..."
-        FASTA_TOPLEVEL="\${FASTA_URL/primary_assembly/toplevel}"
+        FASTA_TOPLEVEL=\$(echo "\${FASTA_URL}" | sed 's/primary_assembly/toplevel/')
         wget -q "\${FASTA_TOPLEVEL}" -O ${species}.fa.gz || curl -sL "\${FASTA_TOPLEVEL}" -o ${species}.fa.gz
     fi
     gunzip ${species}.fa.gz
