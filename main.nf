@@ -900,23 +900,11 @@ process download_matt_references {
         'dm6':  [release: '104', assembly: 'BDGP6.32', species_name: 'drosophila_melanogaster', matt_code: 'Dmel']
     ]
 
-    def info = ensembl_info[species]
-    if (!info) {
-        error "Species ${species} not supported for MATT analysis. Supported: ${ensembl_info.keySet().join(', ')}"
-    }
+    def info = ensembl_info[species] ?: error("Species ${species} not supported for MATT analysis. Supported: ${ensembl_info.keySet().join(', ')}")
 
     def species_cap = info.species_name.split('_').collect { it.capitalize() }.join('_')
-    def gtf_url = ""
-    def fasta_url = ""
-
-    // Use archive for older releases
-    if (info.release.toInteger() <= 75) {
-        gtf_url = "https://ftp.ensembl.org/pub/release-${info.release}/gtf/${info.species_name}/${species_cap}.${info.assembly}.${info.release}.gtf.gz"
-        fasta_url = "https://ftp.ensembl.org/pub/release-${info.release}/fasta/${info.species_name}/dna/${species_cap}.${info.assembly}.${info.release}.dna.primary_assembly.fa.gz"
-    } else {
-        gtf_url = "https://ftp.ensembl.org/pub/release-${info.release}/gtf/${info.species_name}/${species_cap}.${info.assembly}.${info.release}.gtf.gz"
-        fasta_url = "https://ftp.ensembl.org/pub/release-${info.release}/fasta/${info.species_name}/dna/${species_cap}.${info.assembly}.dna.primary_assembly.fa.gz"
-    }
+    def gtf_url = "https://ftp.ensembl.org/pub/release-${info.release}/gtf/${info.species_name}/${species_cap}.${info.assembly}.${info.release}.gtf.gz"
+    def fasta_url = "https://ftp.ensembl.org/pub/release-${info.release}/fasta/${info.species_name}/dna/${species_cap}.${info.assembly}.dna.primary_assembly.fa.gz"
 
     """
     echo "Downloading GTF and FASTA for ${species} (Ensembl release ${info.release})..."
