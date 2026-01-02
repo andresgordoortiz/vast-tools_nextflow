@@ -878,7 +878,6 @@ process download_matt_references {
     label 'process_low'
     storeDir "${params.outdir}/matt_references"
 
-    // Resource requirements
     cpus 2
     memory { 4.GB }
     time { 2.hours }
@@ -889,46 +888,77 @@ process download_matt_references {
     output:
     tuple val(species), path("*.gtf"), path("*.fa"), emit: references
 
-    script:
-    // Map species to Ensembl release and assembly - use simple strings to avoid parsing issues
-    def species_data = [
-        'hg19': ['75', 'GRCh37', 'homo_sapiens', 'Homo_sapiens'],
-        'hg38': ['110', 'GRCh38', 'homo_sapiens', 'Homo_sapiens'],
-        'mm9':  ['67', 'NCBIM37', 'mus_musculus', 'Mus_musculus'],
-        'mm10': ['102', 'GRCm38', 'mus_musculus', 'Mus_musculus'],
-        'rn6':  ['104', 'Rnor_6.0', 'rattus_norvegicus', 'Rattus_norvegicus'],
-        'dm6':  ['104', 'BDGP6.32', 'drosophila_melanogaster', 'Drosophila_melanogaster']
-    ]
+    shell:
+    '''
+    #!/bin/bash
+    set -e
 
-    def data = species_data[species]
-    def release = data[0]
-    def assembly = data[1]
-    def species_name = data[2]
-    def species_cap = data[3]
-    def gtf_url = "https://ftp.ensembl.org/pub/release-${release}/gtf/${species_name}/${species_cap}.${assembly}.${release}.gtf.gz"
-    def fasta_url = "https://ftp.ensembl.org/pub/release-${release}/fasta/${species_name}/dna/${species_cap}.${assembly}.dna.primary_assembly.fa.gz"
+    # Species-specific configuration
+    case "!{species}" in
+        hg19)
+            RELEASE="75"
+            ASSEMBLY="GRCh37"
+            SPECIES_NAME="homo_sapiens"
+            SPECIES_CAP="Homo_sapiens"
+            ;;
+        hg38)
+            RELEASE="110"
+            ASSEMBLY="GRCh38"
+            SPECIES_NAME="homo_sapiens"
+            SPECIES_CAP="Homo_sapiens"
+            ;;
+        mm9)
+            RELEASE="67"
+            ASSEMBLY="NCBIM37"
+            SPECIES_NAME="mus_musculus"
+            SPECIES_CAP="Mus_musculus"
+            ;;
+        mm10)
+            RELEASE="102"
+            ASSEMBLY="GRCm38"
+            SPECIES_NAME="mus_musculus"
+            SPECIES_CAP="Mus_musculus"
+            ;;
+        rn6)
+            RELEASE="104"
+            ASSEMBLY="Rnor_6.0"
+            SPECIES_NAME="rattus_norvegicus"
+            SPECIES_CAP="Rattus_norvegicus"
+            ;;
+        dm6)
+            RELEASE="104"
+            ASSEMBLY="BDGP6.32"
+            SPECIES_NAME="drosophila_melanogaster"
+            SPECIES_CAP="Drosophila_melanogaster"
+            ;;
+        *)
+            echo "ERROR: Species !{species} not supported"
+            exit 1
+            ;;
+    esac
 
-    """
-    echo "Downloading GTF and FASTA for ${species} (Ensembl release ${release})..."
+    GTF_URL="https://ftp.ensembl.org/pub/release-${RELEASE}/gtf/${SPECIES_NAME}/${SPECIES_CAP}.${ASSEMBLY}.${RELEASE}.gtf.gz"
+    FASTA_URL="https://ftp.ensembl.org/pub/release-${RELEASE}/fasta/${SPECIES_NAME}/dna/${SPECIES_CAP}.${ASSEMBLY}.dna.primary_assembly.fa.gz"
+
+    echo "Downloading GTF and FASTA for !{species} (Ensembl release ${RELEASE})..."
 
     # Download GTF
-    echo "Downloading GTF from: ${gtf_url}"
-    wget -q "${gtf_url}" -O ${species}.gtf.gz || curl -sL "${gtf_url}" -o ${species}.gtf.gz
-    gunzip ${species}.gtf.gz
+    echo "Downloading GTF from: ${GTF_URL}"
+    wget -q "${GTF_URL}" -O !{species}.gtf.gz || curl -sL "${GTF_URL}" -o !{species}.gtf.gz
+    gunzip !{species}.gtf.gz
 
     # Download FASTA - try primary_assembly first, fall back to toplevel
     echo "Downloading FASTA..."
-    FASTA_URL="${fasta_url}"
-    if ! wget -q "\${FASTA_URL}" -O ${species}.fa.gz 2>/dev/null; then
+    if ! wget -q "${FASTA_URL}" -O !{species}.fa.gz 2>/dev/null; then
         echo "Primary assembly not found, trying toplevel..."
-        FASTA_TOPLEVEL=\$(echo "\${FASTA_URL}" | sed 's/primary_assembly/toplevel/')
-        wget -q "\${FASTA_TOPLEVEL}" -O ${species}.fa.gz || curl -sL "\${FASTA_TOPLEVEL}" -o ${species}.fa.gz
+        FASTA_TOPLEVEL=$(echo "${FASTA_URL}" | sed 's/primary_assembly/toplevel/')
+        wget -q "${FASTA_TOPLEVEL}" -O !{species}.fa.gz || curl -sL "${FASTA_TOPLEVEL}" -o !{species}.fa.gz
     fi
-    gunzip ${species}.fa.gz
+    gunzip !{species}.fa.gz
 
-    echo "Downloaded reference files for ${species}"
+    echo "Downloaded reference files for !{species}"
     ls -la
-    """
+    '''
 }
 
 // Process to prepare MATT input from vast-tools compare output
