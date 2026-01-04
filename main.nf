@@ -470,14 +470,15 @@ process align_reads {
     publishDir "${params.outdir}/vast_alignment", mode: 'copy', pattern: "vast_out/**"
     container 'andresgordoortiz/vast-tools:latest'
 
-    // Retry configuration - retry once if the process fails
+    // Retry configuration - retry twice if the process fails
     maxRetries 2
     errorStrategy { task.attempt <= maxRetries ? 'retry' : 'terminate' }
 
-    // Resource requirements
+    // Resource requirements - scale both memory AND time with retries for large files
+    // For 200M+ paired-end reads, expect 10-15 hours
     cpus 8
-    memory { 30.GB * task.attempt}
-    time { 10.hours }
+    memory { 30.GB * task.attempt }
+    time { 15.hours + (3.hours * (task.attempt - 1)) }  // 15h -> 18h -> 21h on retries
 
     input:
     tuple val(sample_id), val(sample_type), path(fastq_files), val(group)
