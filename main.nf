@@ -911,43 +911,91 @@ process download_matt_references {
     #!/bin/bash
     set -e
 
+    # Function to download with retry and validation
+    download_file() {
+        local url="$1"
+        local output="$2"
+        local max_retries=3
+        local retry=0
+
+        while [ $retry -lt $max_retries ]; do
+            echo "Attempting download (try $((retry+1))/${max_retries}): ${url}"
+            rm -f "${output}"
+
+            if wget --timeout=60 -q "${url}" -O "${output}" 2>/dev/null; then
+                # Check if file exists and has content
+                if [ -s "${output}" ]; then
+                    # Verify it's actually gzip format
+                    if file "${output}" | grep -q "gzip"; then
+                        echo "Download successful: ${output}"
+                        return 0
+                    else
+                        echo "Downloaded file is not gzip format, retrying..."
+                    fi
+                fi
+            fi
+
+            # Try curl as fallback
+            rm -f "${output}"
+            if curl --connect-timeout 60 -sL "${url}" -o "${output}" 2>/dev/null; then
+                if [ -s "${output}" ] && file "${output}" | grep -q "gzip"; then
+                    echo "Download successful (curl): ${output}"
+                    return 0
+                fi
+            fi
+
+            retry=$((retry + 1))
+            [ $retry -lt $max_retries ] && sleep 5
+        done
+
+        return 1
+    }
+
     # Species-specific configuration
+    # Note: hg19/GRCh37 uses the dedicated GRCh37 Ensembl archive
     case "!{species}" in
         hg19)
-            RELEASE="75"
+            RELEASE="87"
             ASSEMBLY="GRCh37"
             SPECIES_NAME="homo_sapiens"
             SPECIES_CAP="Homo_sapiens"
+            # GRCh37 has its own dedicated Ensembl server
+            BASE_URL="https://ftp.ensembl.org/pub/grch37/release-${RELEASE}"
             ;;
         hg38)
             RELEASE="110"
             ASSEMBLY="GRCh38"
             SPECIES_NAME="homo_sapiens"
             SPECIES_CAP="Homo_sapiens"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         mm9)
             RELEASE="67"
             ASSEMBLY="NCBIM37"
             SPECIES_NAME="mus_musculus"
             SPECIES_CAP="Mus_musculus"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         mm10)
             RELEASE="102"
             ASSEMBLY="GRCm38"
             SPECIES_NAME="mus_musculus"
             SPECIES_CAP="Mus_musculus"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         rn6)
             RELEASE="104"
             ASSEMBLY="Rnor_6.0"
             SPECIES_NAME="rattus_norvegicus"
             SPECIES_CAP="Rattus_norvegicus"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         dm6)
             RELEASE="104"
             ASSEMBLY="BDGP6.32"
             SPECIES_NAME="drosophila_melanogaster"
             SPECIES_CAP="Drosophila_melanogaster"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         *)
             echo "ERROR: Species !{species} not supported"
@@ -955,24 +1003,42 @@ process download_matt_references {
             ;;
     esac
 
-    GTF_URL="https://ftp.ensembl.org/pub/release-${RELEASE}/gtf/${SPECIES_NAME}/${SPECIES_CAP}.${ASSEMBLY}.${RELEASE}.gtf.gz"
-    FASTA_URL="https://ftp.ensembl.org/pub/release-${RELEASE}/fasta/${SPECIES_NAME}/dna/${SPECIES_CAP}.${ASSEMBLY}.dna.primary_assembly.fa.gz"
+    GTF_URL="${BASE_URL}/gtf/${SPECIES_NAME}/${SPECIES_CAP}.${ASSEMBLY}.${RELEASE}.gtf.gz"
+    FASTA_URL="${BASE_URL}/fasta/${SPECIES_NAME}/dna/${SPECIES_CAP}.${ASSEMBLY}.dna.primary_assembly.fa.gz"
+    FASTA_URL_TOPLEVEL="${BASE_URL}/fasta/${SPECIES_NAME}/dna/${SPECIES_CAP}.${ASSEMBLY}.dna.toplevel.fa.gz"
 
     echo "Downloading GTF and FASTA for !{species} (Ensembl release ${RELEASE})..."
+    echo "Base URL: ${BASE_URL}"
 
     # Download GTF
     echo "Downloading GTF from: ${GTF_URL}"
-    wget -q "${GTF_URL}" -O !{species}.gtf.gz || curl -sL "${GTF_URL}" -o !{species}.gtf.gz
+    if ! download_file "${GTF_URL}" "!{species}.gtf.gz"; then
+        echo "ERROR: Failed to download GTF file"
+        exit 1
+    fi
     gunzip !{species}.gtf.gz
 
     # Download FASTA - try primary_assembly first, fall back to toplevel
-    echo "Downloading FASTA..."
-    if ! wget -q "${FASTA_URL}" -O !{species}.fa.gz 2>/dev/null; then
+    echo "Downloading FASTA from: ${FASTA_URL}"
+    if ! download_file "${FASTA_URL}" "!{species}.fa.gz"; then
         echo "Primary assembly not found, trying toplevel..."
-        FASTA_TOPLEVEL=$(echo "${FASTA_URL}" | sed 's/primary_assembly/toplevel/')
-        wget -q "${FASTA_TOPLEVEL}" -O !{species}.fa.gz || curl -sL "${FASTA_TOPLEVEL}" -o !{species}.fa.gz
+        echo "Downloading FASTA from: ${FASTA_URL_TOPLEVEL}"
+        if ! download_file "${FASTA_URL_TOPLEVEL}" "!{species}.fa.gz"; then
+            echo "ERROR: Failed to download FASTA file (tried both primary_assembly and toplevel)"
+            exit 1
+        fi
     fi
     gunzip !{species}.fa.gz
+
+    # Final validation
+    if [ ! -s "!{species}.gtf" ]; then
+        echo "ERROR: GTF file is empty or missing"
+        exit 1
+    fi
+    if [ ! -s "!{species}.fa" ]; then
+        echo "ERROR: FASTA file is empty or missing"
+        exit 1
+    fi
 
     echo "Downloaded reference files for !{species}"
     ls -la
