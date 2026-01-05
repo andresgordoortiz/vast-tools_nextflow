@@ -859,14 +859,19 @@ process compare_groups {
     mkdir -p compare_${group_a}_vs_${group_b}
 
     # Run vast-tools compare
-    vast-tools compare ${inclusion_table} \\
+    # Note: vast-tools compare outputs to current directory by default
+    # We run from inside the output directory to capture all output files
+    cd compare_${group_a}_vs_${group_b}
+
+    vast-tools compare ../${inclusion_table} \\
         -a ${samples_a_str} \\
         -b ${samples_b_str} \\
         --min_dPSI ${params.min_dPSI} \\
         --min_range ${params.min_range} \\
         ${paired_flag} \\
-        -sp ${params.species} \\
-        --outDir compare_${group_a}_vs_${group_b}
+        -sp ${params.species}
+
+    cd ..
 
     echo "✓ Comparison complete: ${group_a} vs ${group_b}"
 
