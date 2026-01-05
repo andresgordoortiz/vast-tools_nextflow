@@ -40,6 +40,12 @@ params.min_range = 5  // Minimum range for vast-tools compare
 params.skip_matt = false  // Skip MATT feature analysis (requires compare to run)
 params.matt_intron_length = 150  // Length of intronic region to search for SF1 hits
 
+// betAS analysis parameters
+params.skip_betas = false  // Skip betAS simulation-based splicing analysis
+params.betas_filter_n = 10  // Minimum N for filtering events in betAS
+params.betas_nsim = 1000  // Number of simulations for betAS analysis
+params.betas_npoints = 500  // Number of points for volcano plot preparation
+
 // Display help message
 def helpMessage() {
     log.info"""
@@ -83,6 +89,12 @@ def helpMessage() {
     MATT Feature Analysis Arguments:
       --skip_matt           Skip MATT feature analysis (default: ${params.skip_matt})
       --matt_intron_length  Intronic region length for SF1 search (default: ${params.matt_intron_length})
+
+    betAS Simulation Analysis Arguments:
+      --skip_betas          Skip betAS simulation-based splicing analysis (default: ${params.skip_betas})
+      --betas_filter_n      Minimum N for filtering events (default: ${params.betas_filter_n})
+      --betas_nsim          Number of simulations (default: ${params.betas_nsim})
+      --betas_npoints       Number of points for volcano plot (default: ${params.betas_npoints})
 
     Note: If your sample CSV contains a 'group' column with 2+ groups, the pipeline
     will automatically run vast-tools compare for all pairwise group comparisons.
@@ -304,7 +316,8 @@ process run_trim_galore {
     errorStrategy { task.attempt <= maxRetries ? 'retry' : 'terminate' }
 
     // Resource requirements - scale memory with retry attempts for large files
-    cpus 2
+    // trim_galore uses cutadapt which scales well up to 4 cores
+    cpus 4
     memory { 32.GB * task.attempt }
     time { 2.hours * task.attempt }
 
@@ -457,14 +470,15 @@ process align_reads {
     publishDir "${params.outdir}/vast_alignment", mode: 'copy', pattern: "vast_out/**"
     container 'andresgordoortiz/vast-tools:latest'
 
-    // Retry configuration - retry once if the process fails
+    // Retry configuration - retry twice if the process fails
     maxRetries 2
     errorStrategy { task.attempt <= maxRetries ? 'retry' : 'terminate' }
 
-    // Resource requirements
+    // Resource requirements - scale both memory AND time with retries for large files
+    // For 200M+ paired-end reads, expect 10-15 hours
     cpus 8
-    memory { 30.GB * task.attempt}
-    time { 10.hours }
+    memory { 30.GB * task.attempt }
+    time { 15.hours + (3.hours * (task.attempt - 1)) }  // 15h -> 18h -> 21h on retries
 
     input:
     tuple val(sample_id), val(sample_type), path(fastq_files), val(group)
@@ -638,10 +652,10 @@ process combine_results {
         }
     }
 
-    // Increase resources to handle larger datasets
-    cpus 8
+    // Resource requirements - combine is mostly I/O bound, not heavily CPU dependent
+    cpus 4
     memory { 64.GB }
-    time { 6.hours }  // Increase time limit to 6 hours
+    time { 6.hours }
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -902,43 +916,91 @@ process download_matt_references {
     #!/bin/bash
     set -e
 
+    # Function to download with retry and validation
+    download_file() {
+        local url="$1"
+        local output="$2"
+        local max_retries=3
+        local retry=0
+
+        while [ $retry -lt $max_retries ]; do
+            echo "Attempting download (try $((retry+1))/${max_retries}): ${url}"
+            rm -f "${output}"
+
+            if wget --timeout=60 -q "${url}" -O "${output}" 2>/dev/null; then
+                # Check if file exists and has content
+                if [ -s "${output}" ]; then
+                    # Verify it's actually gzip format
+                    if file "${output}" | grep -q "gzip"; then
+                        echo "Download successful: ${output}"
+                        return 0
+                    else
+                        echo "Downloaded file is not gzip format, retrying..."
+                    fi
+                fi
+            fi
+
+            # Try curl as fallback
+            rm -f "${output}"
+            if curl --connect-timeout 60 -sL "${url}" -o "${output}" 2>/dev/null; then
+                if [ -s "${output}" ] && file "${output}" | grep -q "gzip"; then
+                    echo "Download successful (curl): ${output}"
+                    return 0
+                fi
+            fi
+
+            retry=$((retry + 1))
+            [ $retry -lt $max_retries ] && sleep 5
+        done
+
+        return 1
+    }
+
     # Species-specific configuration
+    # Note: hg19/GRCh37 uses the dedicated GRCh37 Ensembl archive
     case "!{species}" in
         hg19)
-            RELEASE="75"
+            RELEASE="87"
             ASSEMBLY="GRCh37"
             SPECIES_NAME="homo_sapiens"
             SPECIES_CAP="Homo_sapiens"
+            # GRCh37 has its own dedicated Ensembl server
+            BASE_URL="https://ftp.ensembl.org/pub/grch37/release-${RELEASE}"
             ;;
         hg38)
             RELEASE="110"
             ASSEMBLY="GRCh38"
             SPECIES_NAME="homo_sapiens"
             SPECIES_CAP="Homo_sapiens"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         mm9)
             RELEASE="67"
             ASSEMBLY="NCBIM37"
             SPECIES_NAME="mus_musculus"
             SPECIES_CAP="Mus_musculus"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         mm10)
             RELEASE="102"
             ASSEMBLY="GRCm38"
             SPECIES_NAME="mus_musculus"
             SPECIES_CAP="Mus_musculus"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         rn6)
             RELEASE="104"
             ASSEMBLY="Rnor_6.0"
             SPECIES_NAME="rattus_norvegicus"
             SPECIES_CAP="Rattus_norvegicus"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         dm6)
             RELEASE="104"
             ASSEMBLY="BDGP6.32"
             SPECIES_NAME="drosophila_melanogaster"
             SPECIES_CAP="Drosophila_melanogaster"
+            BASE_URL="https://ftp.ensembl.org/pub/release-${RELEASE}"
             ;;
         *)
             echo "ERROR: Species !{species} not supported"
@@ -946,24 +1008,42 @@ process download_matt_references {
             ;;
     esac
 
-    GTF_URL="https://ftp.ensembl.org/pub/release-${RELEASE}/gtf/${SPECIES_NAME}/${SPECIES_CAP}.${ASSEMBLY}.${RELEASE}.gtf.gz"
-    FASTA_URL="https://ftp.ensembl.org/pub/release-${RELEASE}/fasta/${SPECIES_NAME}/dna/${SPECIES_CAP}.${ASSEMBLY}.dna.primary_assembly.fa.gz"
+    GTF_URL="${BASE_URL}/gtf/${SPECIES_NAME}/${SPECIES_CAP}.${ASSEMBLY}.${RELEASE}.gtf.gz"
+    FASTA_URL="${BASE_URL}/fasta/${SPECIES_NAME}/dna/${SPECIES_CAP}.${ASSEMBLY}.dna.primary_assembly.fa.gz"
+    FASTA_URL_TOPLEVEL="${BASE_URL}/fasta/${SPECIES_NAME}/dna/${SPECIES_CAP}.${ASSEMBLY}.dna.toplevel.fa.gz"
 
     echo "Downloading GTF and FASTA for !{species} (Ensembl release ${RELEASE})..."
+    echo "Base URL: ${BASE_URL}"
 
     # Download GTF
     echo "Downloading GTF from: ${GTF_URL}"
-    wget -q "${GTF_URL}" -O !{species}.gtf.gz || curl -sL "${GTF_URL}" -o !{species}.gtf.gz
+    if ! download_file "${GTF_URL}" "!{species}.gtf.gz"; then
+        echo "ERROR: Failed to download GTF file"
+        exit 1
+    fi
     gunzip !{species}.gtf.gz
 
     # Download FASTA - try primary_assembly first, fall back to toplevel
-    echo "Downloading FASTA..."
-    if ! wget -q "${FASTA_URL}" -O !{species}.fa.gz 2>/dev/null; then
+    echo "Downloading FASTA from: ${FASTA_URL}"
+    if ! download_file "${FASTA_URL}" "!{species}.fa.gz"; then
         echo "Primary assembly not found, trying toplevel..."
-        FASTA_TOPLEVEL=$(echo "${FASTA_URL}" | sed 's/primary_assembly/toplevel/')
-        wget -q "${FASTA_TOPLEVEL}" -O !{species}.fa.gz || curl -sL "${FASTA_TOPLEVEL}" -o !{species}.fa.gz
+        echo "Downloading FASTA from: ${FASTA_URL_TOPLEVEL}"
+        if ! download_file "${FASTA_URL_TOPLEVEL}" "!{species}.fa.gz"; then
+            echo "ERROR: Failed to download FASTA file (tried both primary_assembly and toplevel)"
+            exit 1
+        fi
     fi
     gunzip !{species}.fa.gz
+
+    # Final validation
+    if [ ! -s "!{species}.gtf" ]; then
+        echo "ERROR: GTF file is empty or missing"
+        exit 1
+    fi
+    if [ ! -s "!{species}.fa" ]; then
+        echo "ERROR: FASTA file is empty or missing"
+        exit 1
+    fi
 
     echo "Downloaded reference files for !{species}"
     ls -la
@@ -1200,6 +1280,560 @@ process run_matt_introns {
 
     echo "✓ MATT intron analysis complete"
     ls -la matt_introns_${group_a}_vs_${group_b}/ || true
+    """
+}
+
+// Process to filter inclusion table and prepare betAS data object
+process prepare_betas_data {
+    tag "betAS data preparation"
+    label 'process_high'
+    publishDir "${params.outdir}/betas_analysis", mode: 'copy'
+    container 'andresgordoortiz/splicing_analysis_r_crg:v1.5'
+
+    // Resource requirements - betAS filtering is memory intensive
+    cpus 2
+    memory { 16.GB }
+    time { 1.hours }
+
+    input:
+    path inclusion_table
+    val species
+    val filter_n
+
+    output:
+    path "betas_filtered_events.RData", emit: betas_data
+    path "betas_filtering_summary.txt", emit: summary
+
+    script:
+    """
+    #!/usr/bin/env Rscript
+
+    # Load required libraries
+    library(betAS)
+
+    # Log start
+    cat("Starting betAS data preparation\\n")
+    cat("Inclusion table:", "${inclusion_table}", "\\n")
+    cat("Species:", "${species}", "\\n")
+    cat("Filter N:", ${filter_n}, "\\n")
+
+    # Load and filter data using betAS
+    cat("Loading splicing data...\\n")
+    splicing_data <- getDataset(
+        pathTables = "${inclusion_table}",
+        tool = "vast-tools"
+    )
+
+    cat("Extracting events...\\n")
+    splicing_events_raw <- getEvents(splicing_data, tool = "vast-tools")
+
+    cat("Filtering events with N >= ${filter_n}...\\n")
+    splicing_events <- filterEvents(splicing_events_raw, N = ${filter_n})
+
+    # Summary statistics
+    n_events_raw <- nrow(splicing_events_raw\$PSI)
+    n_events_filtered <- nrow(splicing_events\$PSI)
+    n_samples <- ncol(splicing_events\$PSI)
+
+    cat("\\n=== Filtering Summary ===\\n")
+    cat("Total events before filtering:", n_events_raw, "\\n")
+    cat("Events after filtering (N >=", ${filter_n}, "):", n_events_filtered, "\\n")
+    cat("Number of samples:", n_samples, "\\n")
+    cat("Sample names:", paste(colnames(splicing_events\$PSI), collapse = ", "), "\\n")
+
+    # Save filtered data
+    cat("\\nSaving filtered betAS data...\\n")
+    save(splicing_events, file = "betas_filtered_events.RData")
+
+    # Write summary file
+    summary_text <- paste0(
+        "betAS Filtering Summary\\n",
+        "=======================\\n",
+        "Input file: ${inclusion_table}\\n",
+        "Species: ${species}\\n",
+        "Filter threshold (N): ${filter_n}\\n",
+        "\\n",
+        "Results:\\n",
+        "- Events before filtering: ", n_events_raw, "\\n",
+        "- Events after filtering: ", n_events_filtered, "\\n",
+        "- Number of samples: ", n_samples, "\\n",
+        "- Sample names: ", paste(colnames(splicing_events\$PSI), collapse = ", "), "\\n"
+    )
+    writeLines(summary_text, "betas_filtering_summary.txt")
+
+    cat("✓ betAS data preparation complete\\n")
+    """
+}
+
+// Process to run betAS simulation for a group comparison
+process run_betas_simulation {
+    tag "betAS simulation: ${group_a} vs ${group_b}"
+    label 'process_high'
+    publishDir "${params.outdir}/betas_analysis/${group_a}_vs_${group_b}", mode: 'copy'
+    container 'andresgordoortiz/splicing_analysis_r_crg:v1.5'
+
+    // Resource requirements - simulations are very memory intensive
+    cpus 2
+    memory { 60.GB }
+    time { 72.hours }
+
+    input:
+    path betas_data
+    val group_a
+    val group_b
+    val samples_a
+    val samples_b
+    val nsim
+    val npoints
+
+    output:
+    path "betas_${group_a}_vs_${group_b}_results.csv", emit: results
+    path "betas_${group_a}_vs_${group_b}_summary.txt", emit: summary
+
+    script:
+    def samples_a_r = samples_a.collect { "\"${it}\"" }.join(', ')
+    def samples_b_r = samples_b.collect { "\"${it}\"" }.join(', ')
+    """
+    #!/usr/bin/env Rscript
+
+    # Load required libraries
+    library(betAS)
+
+    # Log start
+    cat("Starting betAS simulation analysis\\n")
+    cat("Comparison: ${group_a} vs ${group_b}\\n")
+    cat("Samples in ${group_a}:", "${samples_a.join(', ')}", "\\n")
+    cat("Samples in ${group_b}:", "${samples_b.join(', ')}", "\\n")
+    cat("Number of simulations:", ${nsim}, "\\n")
+    cat("Number of points:", ${npoints}, "\\n")
+
+    # Load filtered betAS data
+    cat("\\nLoading filtered betAS data...\\n")
+    load("${betas_data}")
+
+    # Get sample names from the data
+    all_samples <- colnames(splicing_events\$PSI)
+    cat("Available samples in data:", paste(all_samples, collapse = ", "), "\\n")
+
+    # Define sample groups
+    samples_group_a <- c(${samples_a_r})
+    samples_group_b <- c(${samples_b_r})
+
+    cat("\\nLooking for group A samples:", paste(samples_group_a, collapse = ", "), "\\n")
+    cat("Looking for group B samples:", paste(samples_group_b, collapse = ", "), "\\n")
+
+    # Find matching columns (handle potential naming differences)
+    find_matching_cols <- function(sample_names, all_cols) {
+        matched <- c()
+        for (s in sample_names) {
+            # Try exact match first
+            if (s %in% all_cols) {
+                matched <- c(matched, which(all_cols == s))
+            } else {
+                # Try partial match (sample name might be part of column name)
+                partial <- grep(s, all_cols, fixed = TRUE)
+                if (length(partial) > 0) {
+                    matched <- c(matched, partial[1])
+                }
+            }
+        }
+        return(unique(matched))
+    }
+
+    colsA <- find_matching_cols(samples_group_a, all_samples)
+    colsB <- find_matching_cols(samples_group_b, all_samples)
+
+    cat("\\nMatched column indices for ${group_a}:", paste(colsA, collapse = ", "), "\\n")
+    cat("Matched column indices for ${group_b}:", paste(colsB, collapse = ", "), "\\n")
+    cat("Matched samples for ${group_a}:", paste(all_samples[colsA], collapse = ", "), "\\n")
+    cat("Matched samples for ${group_b}:", paste(all_samples[colsB], collapse = ", "), "\\n")
+
+    # Check if we found samples
+    if (length(colsA) == 0 || length(colsB) == 0) {
+        cat("\\nERROR: Could not find matching samples for one or both groups\\n")
+        cat("Creating empty results file...\\n")
+
+        # Create empty results
+        empty_df <- data.frame(
+            Error = "No matching samples found",
+            Group_A = "${group_a}",
+            Group_B = "${group_b}",
+            Samples_A_requested = paste(samples_group_a, collapse = ", "),
+            Samples_B_requested = paste(samples_group_b, collapse = ", "),
+            Available_samples = paste(all_samples, collapse = ", ")
+        )
+        write.csv(empty_df, "betas_${group_a}_vs_${group_b}_results.csv", row.names = FALSE)
+
+        summary_text <- paste0(
+            "betAS Simulation Summary - ERROR\\n",
+            "================================\\n",
+            "Comparison: ${group_a} vs ${group_b}\\n",
+            "Error: Could not find matching samples\\n",
+            "Requested ${group_a} samples: ", paste(samples_group_a, collapse = ", "), "\\n",
+            "Requested ${group_b} samples: ", paste(samples_group_b, collapse = ", "), "\\n",
+            "Available samples: ", paste(all_samples, collapse = ", "), "\\n"
+        )
+        writeLines(summary_text, "betas_${group_a}_vs_${group_b}_summary.txt")
+        quit(status = 0)
+    }
+
+    # Set seed for reproducibility
+    set.seed(42)
+    cat("\\nSeed set to 42 for reproducible simulations\\n")
+
+    # Run betAS simulation
+    cat("\\nRunning betAS simulation (this may take a while)...\\n")
+    cat("Using", ${nsim}, "simulations and", ${npoints}, "points\\n")
+
+    start_time <- Sys.time()
+
+    splicing_betAS_df <- prepareTableVolcanoFDR(
+        psitable = splicing_events\$PSI,
+        qualtable = splicing_events\$Qual,
+        npoints = ${npoints},
+        colsA = colsA,
+        colsB = colsB,
+        labA = "${group_a}",
+        labB = "${group_b}",
+        basalColor = "#89C0AE",
+        interestColor = "#E69A9C",
+        maxDevTable = maxDevSimulationN100,
+        nsim = ${nsim},
+        seed = TRUE,
+        CoverageWeight = FALSE
+    )
+
+    end_time <- Sys.time()
+    elapsed <- difftime(end_time, start_time, units = "hours")
+
+    cat("\\nSimulation completed in", round(as.numeric(elapsed), 2), "hours\\n")
+
+    # Save results
+    cat("\\nSaving results...\\n")
+    write.csv(splicing_betAS_df, "betas_${group_a}_vs_${group_b}_results.csv", row.names = TRUE)
+
+    # Calculate summary statistics
+    n_events <- nrow(splicing_betAS_df)
+    n_significant <- if ("FDR" %in% colnames(splicing_betAS_df)) {
+        sum(splicing_betAS_df\$FDR < 0.05, na.rm = TRUE)
+    } else if ("pval" %in% colnames(splicing_betAS_df)) {
+        sum(splicing_betAS_df\$pval < 0.05, na.rm = TRUE)
+    } else {
+        NA
+    }
+
+    # Write summary
+    summary_text <- paste0(
+        "betAS Simulation Summary\\n",
+        "========================\\n",
+        "Comparison: ${group_a} vs ${group_b}\\n",
+        "\\n",
+        "Parameters:\\n",
+        "- Number of simulations: ${nsim}\\n",
+        "- Number of points: ${npoints}\\n",
+        "- Seed: 42\\n",
+        "\\n",
+        "Samples:\\n",
+        "- ${group_a} (n=", length(colsA), "): ", paste(all_samples[colsA], collapse = ", "), "\\n",
+        "- ${group_b} (n=", length(colsB), "): ", paste(all_samples[colsB], collapse = ", "), "\\n",
+        "\\n",
+        "Results:\\n",
+        "- Total events analyzed: ", n_events, "\\n",
+        "- Significant events (FDR < 0.05): ", n_significant, "\\n",
+        "- Processing time: ", round(as.numeric(elapsed), 2), " hours\\n"
+    )
+    writeLines(summary_text, "betas_${group_a}_vs_${group_b}_summary.txt")
+
+    cat("\\n✓ betAS simulation complete for ${group_a} vs ${group_b}\\n")
+    """
+}
+
+// Process to generate pipeline execution summary
+process generate_pipeline_summary {
+    tag "Pipeline Summary"
+    label 'process_low'
+    publishDir "${params.outdir}", mode: 'copy'
+
+    // Resource requirements
+    cpus 1
+    memory { 2.GB }
+    time { 30.min }
+
+    input:
+    path inclusion_table
+    path vast_dirs, stageAs: "vast_out_*"
+    val project_name
+    val species
+    val outdir
+
+    output:
+    path "pipeline_summary_${project_name}.txt", emit: summary_txt
+    path "pipeline_summary_${project_name}.json", emit: summary_json
+
+    script:
+    """
+    #!/bin/bash
+    set -e
+
+    echo "Generating pipeline execution summary..."
+
+    # Initialize summary file
+    SUMMARY_FILE="pipeline_summary_${project_name}.txt"
+    JSON_FILE="pipeline_summary_${project_name}.json"
+
+    # Header
+    cat > \$SUMMARY_FILE << 'HEADER'
+================================================================================
+                    VAST-TOOLS SPLICING ANALYSIS PIPELINE SUMMARY
+================================================================================
+HEADER
+
+    echo "Project: ${project_name}" >> \$SUMMARY_FILE
+    echo "Species: ${species}" >> \$SUMMARY_FILE
+    echo "Generated: \$(date)" >> \$SUMMARY_FILE
+    echo "" >> \$SUMMARY_FILE
+
+    # Initialize JSON
+    echo "{" > \$JSON_FILE
+    echo "  \"project\": \"${project_name}\"," >> \$JSON_FILE
+    echo "  \"species\": \"${species}\"," >> \$JSON_FILE
+    echo "  \"timestamp\": \"\$(date -Iseconds)\"," >> \$JSON_FILE
+
+    # ============================================================
+    # 1. VAST-TOOLS ALIGN STATISTICS
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "1. VAST-TOOLS ALIGNMENT STATISTICS" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    echo "  \"alignment\": {" >> \$JSON_FILE
+    echo "    \"samples\": [" >> \$JSON_FILE
+
+    SAMPLE_COUNT=0
+    FIRST_SAMPLE=true
+    for vast_dir in vast_out_*; do
+        if [ -d "\$vast_dir" ]; then
+            SAMPLE_COUNT=\$((SAMPLE_COUNT + 1))
+            SAMPLE_NAME=\$(basename "\$vast_dir" | sed 's/vast_out_//')
+
+            # Count files in to_combine as a proxy for successful alignment
+            TO_COMBINE_FILES=0
+            if [ -d "\$vast_dir/to_combine" ]; then
+                TO_COMBINE_FILES=\$(find "\$vast_dir/to_combine" -type f | wc -l)
+            fi
+
+            echo "  Sample: \$SAMPLE_NAME" >> \$SUMMARY_FILE
+            echo "    - Output files in to_combine: \$TO_COMBINE_FILES" >> \$SUMMARY_FILE
+
+            # JSON entry
+            if [ "\$FIRST_SAMPLE" = "false" ]; then
+                echo "," >> \$JSON_FILE
+            fi
+            FIRST_SAMPLE=false
+            echo -n "      {\"name\": \"\$SAMPLE_NAME\", \"output_files\": \$TO_COMBINE_FILES}" >> \$JSON_FILE
+        fi
+    done
+
+    echo "" >> \$JSON_FILE
+    echo "    ]," >> \$JSON_FILE
+    echo "    \"total_samples\": \$SAMPLE_COUNT" >> \$JSON_FILE
+    echo "  }," >> \$JSON_FILE
+
+    echo "" >> \$SUMMARY_FILE
+    echo "  Total samples aligned: \$SAMPLE_COUNT" >> \$SUMMARY_FILE
+    echo "" >> \$SUMMARY_FILE
+
+    # ============================================================
+    # 2. VAST-TOOLS COMBINE STATISTICS
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "2. VAST-TOOLS COMBINE STATISTICS" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    if [ -f "${inclusion_table}" ]; then
+        # Count total events (excluding header)
+        TOTAL_EVENTS=\$(tail -n +2 "${inclusion_table}" | wc -l)
+
+        # Count samples (columns after the first few metadata columns)
+        HEADER_LINE=\$(head -1 "${inclusion_table}")
+        TOTAL_COLUMNS=\$(echo "\$HEADER_LINE" | awk -F'\\t' '{print NF}')
+
+        # Count event types if possible
+        EXON_EVENTS=\$(grep -c "EX\\|Alt\\|ALTA\\|ALTD" "${inclusion_table}" 2>/dev/null || echo "N/A")
+        IR_EVENTS=\$(grep -c "^IR\\|\\tIR" "${inclusion_table}" 2>/dev/null || echo "N/A")
+        MIC_EVENTS=\$(grep -c "MIC" "${inclusion_table}" 2>/dev/null || echo "N/A")
+
+        echo "  Inclusion table: ${inclusion_table}" >> \$SUMMARY_FILE
+        echo "  Total splicing events: \$TOTAL_EVENTS" >> \$SUMMARY_FILE
+        echo "  Total columns: \$TOTAL_COLUMNS" >> \$SUMMARY_FILE
+        echo "" >> \$SUMMARY_FILE
+        echo "  Event type estimates:" >> \$SUMMARY_FILE
+        echo "    - Exon skipping (EX/Alt): ~\$EXON_EVENTS" >> \$SUMMARY_FILE
+        echo "    - Intron retention (IR): ~\$IR_EVENTS" >> \$SUMMARY_FILE
+        echo "    - Microexons (MIC): ~\$MIC_EVENTS" >> \$SUMMARY_FILE
+
+        echo "  \"combine\": {" >> \$JSON_FILE
+        echo "    \"inclusion_table\": \"${inclusion_table}\"," >> \$JSON_FILE
+        echo "    \"total_events\": \$TOTAL_EVENTS," >> \$JSON_FILE
+        echo "    \"total_columns\": \$TOTAL_COLUMNS" >> \$JSON_FILE
+        echo "  }," >> \$JSON_FILE
+    else
+        echo "  WARNING: Inclusion table not found!" >> \$SUMMARY_FILE
+        echo "  \"combine\": {\"error\": \"inclusion table not found\"}," >> \$JSON_FILE
+    fi
+    echo "" >> \$SUMMARY_FILE
+
+    # ============================================================
+    # 3. VAST-TOOLS COMPARE STATISTICS (scan output directory)
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "3. VAST-TOOLS COMPARE STATISTICS (Differential Splicing)" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    echo "  \"compare\": [" >> \$JSON_FILE
+    FIRST_COMPARE=true
+    COMPARE_COUNT=0
+
+    # Look for compare results in the output directory
+    if [ -d "${outdir}/compare_results" ]; then
+        for compare_dir in ${outdir}/compare_results/compare_*; do
+            if [ -d "\$compare_dir" ]; then
+                COMPARE_COUNT=\$((COMPARE_COUNT + 1))
+                COMPARISON_NAME=\$(basename "\$compare_dir" | sed 's/compare_//')
+
+                # Find diff files and count significant events
+                DIFF_FILE=\$(find "\$compare_dir" -name "*.tab" -type f 2>/dev/null | head -1)
+                DIFF_EVENTS="N/A"
+                UP_EVENTS="N/A"
+                DOWN_EVENTS="N/A"
+
+                if [ -n "\$DIFF_FILE" ] && [ -f "\$DIFF_FILE" ]; then
+                    DIFF_EVENTS=\$(tail -n +2 "\$DIFF_FILE" | wc -l)
+                    UP_EVENTS=\$(awk -F'\\t' 'NR>1 && \$NF > 0 {count++} END {print count+0}' "\$DIFF_FILE" 2>/dev/null || echo "N/A")
+                    DOWN_EVENTS=\$(awk -F'\\t' 'NR>1 && \$NF < 0 {count++} END {print count+0}' "\$DIFF_FILE" 2>/dev/null || echo "N/A")
+                fi
+
+                echo "  Comparison: \$COMPARISON_NAME" >> \$SUMMARY_FILE
+                echo "    - Differential events: \$DIFF_EVENTS" >> \$SUMMARY_FILE
+                echo "    - Up-regulated (dPSI > 0): \$UP_EVENTS" >> \$SUMMARY_FILE
+                echo "    - Down-regulated (dPSI < 0): \$DOWN_EVENTS" >> \$SUMMARY_FILE
+                echo "" >> \$SUMMARY_FILE
+
+                if [ "\$FIRST_COMPARE" = "false" ]; then
+                    echo "," >> \$JSON_FILE
+                fi
+                FIRST_COMPARE=false
+                echo -n "    {\"comparison\": \"\$COMPARISON_NAME\", \"diff_events\": \"\$DIFF_EVENTS\", \"up\": \"\$UP_EVENTS\", \"down\": \"\$DOWN_EVENTS\"}" >> \$JSON_FILE
+            fi
+        done
+    fi
+
+    if [ \$COMPARE_COUNT -eq 0 ]; then
+        echo "  No comparisons performed (skipped or no groups defined)" >> \$SUMMARY_FILE
+    fi
+
+    echo "" >> \$JSON_FILE
+    echo "  ]," >> \$JSON_FILE
+
+    # ============================================================
+    # 4. betAS ANALYSIS STATISTICS (scan output directory)
+    # ============================================================
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+    echo "4. betAS SIMULATION-BASED ANALYSIS STATISTICS" >> \$SUMMARY_FILE
+    echo "--------------------------------------------------------------------------------" >> \$SUMMARY_FILE
+
+    echo "  \"betas\": {" >> \$JSON_FILE
+
+    # Look for betAS filtering summary
+    FILTER_SUMMARY="${outdir}/betas_analysis/betas_filtering_summary.txt"
+    if [ -f "\$FILTER_SUMMARY" ]; then
+        echo "  Data Filtering:" >> \$SUMMARY_FILE
+        grep -E "Events|samples|threshold" "\$FILTER_SUMMARY" 2>/dev/null | sed 's/^/    /' >> \$SUMMARY_FILE || true
+        echo "" >> \$SUMMARY_FILE
+
+        EVENTS_BEFORE=\$(grep "before filtering" "\$FILTER_SUMMARY" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+        EVENTS_AFTER=\$(grep "after filtering" "\$FILTER_SUMMARY" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+        N_SAMPLES=\$(grep "Number of samples" "\$FILTER_SUMMARY" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+
+        echo "    \"filtering\": {" >> \$JSON_FILE
+        echo "      \"events_before\": \"\$EVENTS_BEFORE\"," >> \$JSON_FILE
+        echo "      \"events_after\": \"\$EVENTS_AFTER\"," >> \$JSON_FILE
+        echo "      \"samples\": \"\$N_SAMPLES\"" >> \$JSON_FILE
+        echo "    }," >> \$JSON_FILE
+    else
+        echo "  No betAS filtering data found (analysis may be skipped or pending)" >> \$SUMMARY_FILE
+        echo "    \"filtering\": null," >> \$JSON_FILE
+    fi
+
+    echo "    \"simulations\": [" >> \$JSON_FILE
+    FIRST_BETAS=true
+    BETAS_COUNT=0
+
+    # Look for betAS simulation summaries in output directory
+    if [ -d "${outdir}/betas_analysis" ]; then
+        for betas_dir in ${outdir}/betas_analysis/*/; do
+            if [ -d "\$betas_dir" ]; then
+                BETAS_SUMMARY="\${betas_dir}betas_*_summary.txt"
+                for summary_file in \$BETAS_SUMMARY; do
+                    if [ -f "\$summary_file" ]; then
+                        BETAS_COUNT=\$((BETAS_COUNT + 1))
+                        COMPARISON_NAME=\$(basename "\$(dirname "\$summary_file")")
+
+                        echo "  Simulation: \$COMPARISON_NAME" >> \$SUMMARY_FILE
+
+                        if grep -q "ERROR" "\$summary_file" 2>/dev/null; then
+                            echo "    - Status: ERROR (see details in output file)" >> \$SUMMARY_FILE
+                            STATUS="error"
+                            TOTAL_EVENTS="N/A"
+                            SIG_EVENTS="N/A"
+                        else
+                            STATUS="completed"
+                            TOTAL_EVENTS=\$(grep "Total events" "\$summary_file" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+                            SIG_EVENTS=\$(grep "Significant events" "\$summary_file" 2>/dev/null | grep -oE '[0-9]+' | tail -1 || echo "N/A")
+                            PROC_TIME=\$(grep "Processing time" "\$summary_file" 2>/dev/null | grep -oE '[0-9.]+' | tail -1 || echo "N/A")
+
+                            echo "    - Status: Completed" >> \$SUMMARY_FILE
+                            echo "    - Total events analyzed: \$TOTAL_EVENTS" >> \$SUMMARY_FILE
+                            echo "    - Significant events (FDR < 0.05): \$SIG_EVENTS" >> \$SUMMARY_FILE
+                            echo "    - Processing time: \$PROC_TIME hours" >> \$SUMMARY_FILE
+                        fi
+                        echo "" >> \$SUMMARY_FILE
+
+                        if [ "\$FIRST_BETAS" = "false" ]; then
+                            echo "," >> \$JSON_FILE
+                        fi
+                        FIRST_BETAS=false
+                        echo -n "      {\"comparison\": \"\$COMPARISON_NAME\", \"status\": \"\$STATUS\", \"total_events\": \"\$TOTAL_EVENTS\", \"significant_events\": \"\$SIG_EVENTS\"}" >> \$JSON_FILE
+                    fi
+                done
+            fi
+        done
+    fi
+
+    if [ \$BETAS_COUNT -eq 0 ]; then
+        echo "  No betAS simulations found (analysis may be skipped or pending)" >> \$SUMMARY_FILE
+    fi
+
+    echo "" >> \$JSON_FILE
+    echo "    ]" >> \$JSON_FILE
+    echo "  }" >> \$JSON_FILE
+
+    # Close JSON
+    echo "}" >> \$JSON_FILE
+
+    # ============================================================
+    # FOOTER
+    # ============================================================
+    echo "" >> \$SUMMARY_FILE
+    echo "================================================================================" >> \$SUMMARY_FILE
+    echo "                              END OF SUMMARY" >> \$SUMMARY_FILE
+    echo "================================================================================" >> \$SUMMARY_FILE
+
+    echo ""
+    echo "✓ Pipeline summary generated:"
+    echo "  - Text: \$SUMMARY_FILE"
+    echo "  - JSON: \$JSON_FILE"
+    cat \$SUMMARY_FILE
     """
 }
 
@@ -1460,6 +2094,10 @@ workflow {
       - Min Range:         ${params.min_range}
       - Skip MATT:         ${params.skip_matt}
       - MATT intron length: ${params.matt_intron_length}
+      - Skip betAS:        ${params.skip_betas}
+      - betAS filter N:    ${params.betas_filter_n}
+      - betAS simulations: ${params.betas_nsim}
+      - betAS npoints:     ${params.betas_npoints}
     """
 
     // Prepare VASTDB - now just validates paths
@@ -1541,6 +2179,52 @@ workflow {
     // RMarkdown report generation is deprecated/disabled
     // To re-enable in the future, set params.skip_rmarkdown = false
 
+    // Run betAS simulation-based splicing analysis if not skipped
+    // This runs independently after vast-tools combine, doesn't require compare
+    if (!params.skip_betas) {
+        // Parse groups from CSV file for betAS
+        def groupInfoBetas = parseGroupsFromCsv(params.sample_csv)
+        def groupsBetas = groupInfoBetas.groups
+        def has_paired_betas = groupInfoBetas.has_paired
+
+        if (groupsBetas.size() >= 2) {
+            log.info "betAS analysis enabled - preparing filtered data..."
+            log.info "Found ${groupsBetas.size()} groups for betAS analysis: ${groupsBetas.keySet().join(', ')}"
+
+            // Generate pairwise comparisons for betAS
+            def comparisonsBetas = generatePairwiseComparisons(groupsBetas, has_paired_betas)
+            log.info "Will run ${comparisonsBetas.size()} betAS simulation(s)"
+
+            // First, prepare the betAS filtered data object from the inclusion table
+            betas_data = prepare_betas_data(
+                inclusion_table,
+                params.species,
+                params.betas_filter_n
+            )
+
+            // Create channel for betAS simulations from comparisons
+            betas_channel = Channel.from(comparisonsBetas)
+                .combine(betas_data.betas_data)
+
+            // Run betAS simulation for each pairwise comparison
+            betas_results = run_betas_simulation(
+                betas_channel.map { it[1] },           // betas_data RData file
+                betas_channel.map { it[0].group_a },
+                betas_channel.map { it[0].group_b },
+                betas_channel.map { it[0].samples_a },
+                betas_channel.map { it[0].samples_b },
+                params.betas_nsim,
+                params.betas_npoints
+            )
+
+            log.info "betAS simulation jobs submitted"
+        } else {
+            log.info "Skipping betAS analysis: Need at least 2 groups, found ${groupsBetas.size()}"
+        }
+    } else {
+        log.info "Skipping betAS analysis as per user request."
+    }
+
     // Run vast-tools compare for pairwise group comparisons if groups are defined
     if (!params.skip_compare) {
         // Parse groups from CSV file
@@ -1611,4 +2295,20 @@ workflow {
     } else {
         log.info "Skipping vast-tools compare as per user request."
     }
+
+    // ============================================================
+    // PIPELINE SUMMARY - Collect all outputs and generate report
+    // ============================================================
+
+    // Collect vast alignment directories (always available)
+    vast_dirs_for_summary = align_results.vast_out_dir.collect()
+
+    // Generate pipeline summary - scans output directory for compare and betAS results
+    generate_pipeline_summary(
+        inclusion_table,
+        vast_dirs_for_summary,
+        params.project_name,
+        params.species,
+        params.outdir
+    )
 }
