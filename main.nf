@@ -648,14 +648,18 @@ process combine_results {
         if (workflow.containerEngine == 'singularity') {
             return "${baseOptions} --bind /tmp:/tmp --bind \$PWD:\$PWD"
         } else {
-            return '--ulimit stack=unlimited --ulimit memlock=unlimited --shm-size=16g'
+            return '--ulimit stack=unlimited --ulimit memlock=unlimited --shm-size=32g'
         }
     }
 
-    // Resource requirements - combine is mostly I/O bound, not heavily CPU dependent
-    cpus 4
-    memory { 64.GB }
-    time { 6.hours }
+    // Retry configuration - increase resources on retry
+    maxRetries 2
+    errorStrategy { task.exitStatus == 140 ? 'retry' : 'terminate' }
+
+    // Resource requirements - combine is memory intensive, increase substantially
+    cpus 8
+    memory { 128.GB * task.attempt }  // 128GB -> 256GB on retry
+    time { 12.hours * task.attempt }   // 12h -> 24h on retry
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
