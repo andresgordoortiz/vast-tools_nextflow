@@ -659,7 +659,7 @@ process combine_results {
     // Resource requirements - combine is memory intensive, increase substantially
     cpus 8
     memory { 128.GB * task.attempt }  // 128GB -> 256GB on retry
-    time { 12.hours * task.attempt }   // 12h -> 24h on retry
+    time { 4.hours * task.attempt }   // 4h -> 8h on retry
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
