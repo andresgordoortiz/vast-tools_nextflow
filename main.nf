@@ -644,22 +644,22 @@ process combine_results {
 
     // HPC-optimized container options
     containerOptions {
-        def baseOptions = '--writable-tmpfs --no-home --cleanenv'
         if (workflow.containerEngine == 'singularity') {
-            return "${baseOptions} --bind /tmp:/tmp --bind \$PWD:\$PWD"
+            // CRITICAL: Bind the external VASTDB to where the container expects it
+            return "--writable-tmpfs --no-home --cleanenv --bind ${params.vastdb_path}:/usr/local/vast-tools/VASTDB --bind /tmp:/tmp --bind \$PWD:\$PWD"
         } else {
             return '--ulimit stack=unlimited --ulimit memlock=unlimited --shm-size=32g'
         }
     }
 
-    // Retry configuration - increase resources on retry
+    // Retry configuration
     maxRetries 2
-    errorStrategy { task.exitStatus == 140 ? 'retry' : 'terminate' }
+    errorStrategy { task.exitStatus in [140, 139, 137, 143] ? 'retry' : 'terminate' }
 
-    // Resource requirements - combine is memory intensive, increase substantially
+    // Resource requirements - combine should be lightweight
     cpus 8
-    memory { 128.GB * task.attempt }  // 128GB -> 256GB on retry
-    time { 4.hours * task.attempt }   // 4h -> 8h on retry
+    memory { (16.GB * task.attempt) }  // 16GB -> 32GB on retry
+    time { 2.hours }
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -712,63 +712,48 @@ process combine_results {
     ls -la to_combine | head -20
 
     if [ \$file_count -gt 0 ]; then
-        # HPC-specific optimizations for Singularity
-        echo "Setting environment for HPC Singularity execution..."
-        export TMPDIR=\${PWD}/tmp
-        mkdir -p \$TMPDIR
+        # Simple environment setup
+        echo "Running vast-tools combine..."
+        echo "Attempt: ${task.attempt}"
+        echo "Memory: ${task.memory}"
+        echo "Files to combine: \$file_count"
 
-        # Set resource limits more conservatively for HPC
-        ulimit -s 8192  # 8MB stack instead of unlimited
-        ulimit -n 4096  # Increase file descriptors
+        # VASTDB is already mounted via containerOptions, use the internal path
+        export VASTDB=/usr/local/vast-tools/VASTDB
 
-        # Clean environment for Singularity
-        unset LD_LIBRARY_PATH
-        unset PERL5LIB
+        echo "VASTDB location: \$VASTDB"
+        ls -la "\$VASTDB" || echo "WARNING: Cannot access VASTDB"
 
-        # Set VASTDB path
-        export VASTDB=${vastdb_path}
-        echo "VASTDB set to \$VASTDB"
-        echo "TMPDIR set to \$TMPDIR"
+        # Verify the species directory exists
+        echo "Checking for species directory Mm2 (for mm10):"
+        ls -la "\$VASTDB/Mm2" || echo "ERROR: Species directory not found!"
 
-        # Check if running in Singularity vs Docker
-        if [ -n "\${SINGULARITY_CONTAINER:-}" ]; then
-            echo "Running in Singularity container: \$SINGULARITY_CONTAINER"
+        # CRITICAL: Test if vast-tools works at all
+        echo ""
+        echo "=== TESTING VAST-TOOLS INSTALLATION ==="
+        which vast-tools || echo "WARNING: vast-tools not in PATH"
 
-            # Singularity-specific environment
-            export PERL5OPT=""  # Clear potentially problematic Perl options
-            export PERL_HASH_SEED=0
+        echo "Testing vast-tools help:"
+        vast-tools -h 2>&1 | head -10 || echo "ERROR: Cannot run vast-tools -h"
 
-            # Run with much longer timeout (24 hours) and periodic progress monitoring
-            echo "Starting vast-tools combine (Singularity mode)..."
+        echo ""
+        echo "Testing vast-tools combine help:"
+        vast-tools combine -h 2>&1 | head -10 || echo "ERROR: Cannot run vast-tools combine -h"
 
-            # Start progress monitoring in background
-            (
-                while true; do
-                    echo "\$(date): Combine operation in progress... Files: \$(find to_combine -type f | wc -l)"
-                    if [ -d "tmp" ]; then
-                        echo "Temp directory size: \$(du -sh tmp 2>/dev/null || echo 'N/A')"
-                    fi
-                    echo "Memory usage: \$(free -h 2>/dev/null || echo 'N/A')"
-                    sleep 900  # Check every 15 minutes
-                done
-            ) > combine_progress.log 2>&1 &
-            PROGRESS_PID=\$!
+        echo "=== END VAST-TOOLS TEST ==="
+        echo ""
 
-            # Use a much longer timeout (86400 seconds = 24 hours)
-            timeout 86400 vast-tools combine to_combine/ -sp ${params.species} -o . --verbose > combine.log 2>&1
-            combine_exit_code=\$?
+        # Run combine WITHOUT timeout (let Nextflow handle timeouts)
+        # Redirect output to capture any error messages
+        echo "Starting vast-tools combine at \$(date)"
 
-            # Kill the progress monitor
-            kill \$PROGRESS_PID 2>/dev/null || true
-        else
-            echo "Running in Docker container"
-            # Docker execution with longer timeout
-            timeout -k 2h 24h bash -c "vast-tools combine to_combine/ -sp ${params.species} -o . --verbose" 2> combine_error.log
-            combine_exit_code=\$?
-        fi
+        vast-tools combine to_combine/ -sp ${params.species} -o . --verbose 2>&1 | tee combine_output.log
+        combine_exit_code=\${PIPESTATUS[0]}
+
+        echo "Combine finished at \$(date) with exit code: \$combine_exit_code"
 
         if [ \$combine_exit_code -eq 0 ]; then
-            echo "VAST-tools combine completed successfully"
+            echo "✓ VAST-tools combine completed successfully"
 
             # Look for output file
             inclusion_file=\$(find . -name "INCLUSION_LEVELS_FULL*${params.species}*" -type f | head -n 1)
@@ -777,63 +762,43 @@ process combine_results {
                 cp "\$inclusion_file" "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
                 echo "✓ Results successfully combined"
             else
-                echo "No inclusion table found, creating placeholder"
-                echo "# VAST-tools combine completed but no output file found" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-                echo "# Files processed: \$file_count" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-                echo "# Created: \$(date)" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
+                echo "WARNING: No inclusion table found after successful combine"
+                ls -la
             fi
         else
-            echo "Combine failed with exit code \$combine_exit_code"
+            echo "ERROR: Combine failed with exit code \$combine_exit_code"
 
-            # Comprehensive debug output
-            echo "=== DEBUG INFORMATION ==="
-            echo "Container environment: \${SINGULARITY_CONTAINER:-docker}"
-            echo "Working directory: \$(pwd)"
-            echo "Files in to_combine: \$(ls -la to_combine/ | wc -l)"
-            echo "Available memory: \$(cat /proc/meminfo | grep MemAvailable || echo 'N/A')"
-            echo "Disk space: \$(df -h . || echo 'N/A')"
+            # Show all available logs
+            echo "=== OUTPUT LOG ==="
+            cat combine_output.log || echo "No output log found"
 
-            # Check logs
-            if [ -f "combine.log" ]; then
-                echo "=== COMBINE LOG ==="
-                tail -100 combine.log
-            fi
+            echo ""
+            echo "=== DIRECTORY CONTENTS ==="
+            ls -la
 
-            if [ -f "combine_error.log" ]; then
-                echo "=== ERROR LOG ==="
-                cat combine_error.log
-            fi
+            echo ""
+            echo "=== VAST-TOOLS VERSION ==="
+            vast-tools --version || echo "Cannot get vast-tools version"
 
-            if [ -f "combine_progress.log" ]; then
-                echo "=== PROGRESS LOG ==="
-                tail -50 combine_progress.log
-            fi
-
-            echo "Creating error report file"
-            echo "# VAST-tools combine failed with exit code \$combine_exit_code" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-            echo "# Container: \${SINGULARITY_CONTAINER:-docker}" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-            echo "# Input files: \$file_count" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-            echo "# Error occurred at: \$(date)" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-
-            # Include log content if available
-            if [ -f "combine.log" ]; then
-                echo "# Log content:" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-                tail -50 combine.log >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" 2>/dev/null || true
-            fi
-
-            # If timeout occurred, make that clear
-            if [ \$combine_exit_code -eq 124 ]; then
-                echo "# ERROR: Process timed out after 24 hours" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-                echo "# Consider splitting your dataset or increasing the timeout further" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-            fi
+            echo ""
+            echo "Creating error placeholder file"
+            cat > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" << EOF
+# VAST-tools combine failed with exit code \$combine_exit_code
+# Attempt: ${task.attempt}
+# Input files: \$file_count
+# Species: ${params.species}
+# Error occurred at: \$(date)
+# Check combine_output.log for details
+EOF
         fi
     else
         echo "No files found to combine, creating empty output file"
-        echo "# No VAST-tools output files found to combine" > "ewing_splicing_PRJNA407215_INCLUSION_LEVELS_FULL-hg19.tab"
-        echo "# Created: \$(date)" >> "ewing_splicing_PRJNA407215_INCLUSION_LEVELS_FULL-hg19.tab"
+        echo "# No VAST-tools output files found to combine" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
+        echo "# Created: \$(date)" >> "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
     fi
     """
 }
+
 
 process compare_groups {
     tag "VAST-tools compare: ${group_a} vs ${group_b}"
