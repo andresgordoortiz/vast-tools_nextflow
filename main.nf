@@ -644,22 +644,22 @@ process combine_results {
 
     // HPC-optimized container options
     containerOptions {
-        def baseOptions = '--writable-tmpfs --no-home --cleanenv'
         if (workflow.containerEngine == 'singularity') {
-            return "${baseOptions} --bind /tmp:/tmp --bind \$PWD:\$PWD"
+            // CRITICAL: Bind the external VASTDB to where the container expects it
+            return "--writable-tmpfs --no-home --cleanenv --bind ${params.vastdb_path}:/usr/local/vast-tools/VASTDB --bind /tmp:/tmp --bind \$PWD:\$PWD"
         } else {
             return '--ulimit stack=unlimited --ulimit memlock=unlimited --shm-size=32g'
         }
     }
 
-    // Retry configuration - increase resources on retry
+    // Retry configuration
     maxRetries 2
-    errorStrategy { task.exitStatus == 140 ? 'retry' : 'terminate' }
+    errorStrategy { task.exitStatus in [140, 139, 137, 143] ? 'retry' : 'terminate' }
 
-    // Resource requirements - combine is memory intensive, increase substantially
+    // Resource requirements - combine should be lightweight
     cpus 8
-    memory { 128.GB * task.attempt }  // 128GB -> 256GB on retry
-    time { 4.hours * task.attempt }   // 4h -> 8h on retry
+    memory { (16.GB * task.attempt) }  // 16GB -> 32GB on retry
+    time { 2.hours }
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -752,6 +752,7 @@ process combine_results {
     fi
     """
 }
+
 
 process compare_groups {
     tag "VAST-tools compare: ${group_a} vs ${group_b}"
