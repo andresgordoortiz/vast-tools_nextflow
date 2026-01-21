@@ -659,7 +659,7 @@ process combine_results {
     // Resource requirements - combine should be lightweight
     cpus 8
     memory { (16.GB * task.attempt) }  // 16GB -> 32GB on retry
-    time { 2.hours }
+    time { 4.hours * task.attempt }  // 4h -> 8h on retry
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
