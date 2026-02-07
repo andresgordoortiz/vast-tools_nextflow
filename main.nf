@@ -652,14 +652,16 @@ process combine_results {
         }
     }
 
-    // Retry configuration
-    maxRetries 2
-    errorStrategy { task.exitStatus in [140, 139, 137, 143] ? 'retry' : 'terminate' }
+    // Retry configuration - more retries for sporadic issues
+    maxRetries 3
+    errorStrategy { task.exitStatus in [140, 139, 137, 143, 1] ? 'retry' : 'terminate' }
 
-    // Resource requirements - combine should be lightweight
-    cpus 8
-    memory { (16.GB * task.attempt) }  // 16GB -> 32GB on retry
-    time { 4.hours * task.attempt }  // 4h -> 8h on retry
+    // CRITICAL: vast-tools combine MUST use single core (-c 1)
+    // Using multiple cores causes each subprocess to load VASTDB into memory separately,
+    // leading to OOM kills (exit 140). See GitHub issue vastgroup/vast-tools#131
+    cpus 1
+    memory { 32.GB * Math.pow(2, task.attempt - 1) }  // 32GB -> 64GB -> 128GB -> 256GB on retries
+    time { 4.hours * task.attempt }  // More time for large datasets
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -673,6 +675,12 @@ process combine_results {
     """
     echo "VAST-tools combine attempt ${task.attempt} with ${task.memory} memory"
     echo "Using VASTDB path: ${vastdb_path}"
+    echo "CRITICAL: Running with single core to avoid memory issues (GitHub issue #131)"
+
+    # CRITICAL: Clean up any leftover temporary directories from previous runs
+    # This is recommended by VAST-tools maintainers to avoid parallelization issues
+    echo "Cleaning up temporary directories..."
+    rm -rf tmp/ raw_incl/ raw_reads/ 2>/dev/null || true
 
     # Create the directory structure VAST-tools expects
     mkdir -p to_combine
@@ -724,7 +732,11 @@ process combine_results {
     echo "VASTDB directory: ${vastdb_path}"
 
     # Run combine - it should process all event types
-    vast-tools combine -o . -sp ${params.species} -c ${task.cpus} --verbose --IR_version 2 to_combine/ 2>&1 | tee combine.log
+    # CRITICAL: Use -c 1 (single core) to avoid memory issues
+    # Using multiple cores with combine causes each subprocess to load VASTDB
+    # independently, multiplying memory usage and causing OOM kills.
+    # See GitHub issue vastgroup/vast-tools#131
+    vast-tools combine -o . -sp ${params.species} -c 1 --verbose --IR_version 2 to_combine/ 2>&1 | tee combine.log
 
     combine_exit=\${PIPESTATUS[0]}
 
