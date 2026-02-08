@@ -677,57 +677,135 @@ process combine_results {
 
     script:
     """
-    echo "VAST-tools combine attempt ${task.attempt} with ${task.memory} memory"
+    #!/bin/bash
+    set -euo pipefail
 
-    # Clean up leftover temp dirs from any prior failed attempts
+    # ── Helper: timestamp logger ──
+    ts() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$*"; }
+
+    ts "=== VAST-tools combine START ==="
+    ts "Attempt: ${task.attempt} | Memory: ${task.memory} | CPUs: ${task.cpus}"
+    ts "Species: ${params.species} | Working dir: \$(pwd)"
+
+    # Show system info for debugging
+    ts "--- System Info ---"
+    free -h 2>/dev/null || true
+    df -h . 2>/dev/null | head -2 || true
+    echo ""
+
+    # ── Clean up leftover temp dirs from any prior failed attempts ──
     rm -rf raw_incl/ raw_reads/ tmp/ 2>/dev/null || true
 
-    # Create to_combine/ directory that vast-tools expects inside -o dir
+    # ── Create to_combine/ directory ──
     mkdir -p to_combine
 
-    # Collect VAST-tools align output files into to_combine/
+    # ── Collect VAST-tools align output files ──
+    ts "--- Collecting align output files ---"
     for dir in vast_*; do
         [ -d "\$dir" ] || continue
-        echo "Processing: \$dir"
         if [ -d "\$dir/to_combine" ]; then
+            sample_files=\$(ls "\$dir/to_combine/" 2>/dev/null | head -1)
+            ts "  \$dir -> \$(ls "\$dir/to_combine/" 2>/dev/null | wc -l) files"
             cp "\$dir/to_combine"/*.{eej2,exskX,IR2,IR.summary_v2.txt,micX,MULTI3X,info} to_combine/ 2>/dev/null || true
+        else
+            ts "  WARNING: \$dir/to_combine/ not found!"
         fi
     done
 
-    # Verify files
+    # ── Verify collected files ──
     file_count=\$(find to_combine -type f | wc -l)
-    echo "Found \$file_count files in to_combine/"
+    ts "Total files in to_combine/: \$file_count"
+    ts "File types breakdown:"
+    for ext in eej2 exskX IR2 IR.summary_v2.txt micX MULTI3X info; do
+        count=\$(ls to_combine/*.\$ext 2>/dev/null | wc -l)
+        ts "  *.\$ext: \$count files"
+    done
+
     if [ \$file_count -eq 0 ]; then
-        echo "ERROR: No files found to combine!"
+        ts "ERROR: No files found to combine!"
         exit 1
     fi
 
-    # Run vast-tools combine
-    # - "-o ." means use current dir which contains to_combine/
-    # - No positional args: combine reads to_combine/ from the -o directory automatically
-    # - --cores 1: single-threaded to avoid memory multiplication (default is already 1)
-    echo "Running: vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose"
-    vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose
-    combine_exit=\$?
+    # ── Verify VASTDB is accessible ──
+    ts "--- VASTDB check ---"
+    if [ -d "/usr/local/vast-tools/VASTDB" ]; then
+        ts "VASTDB found at /usr/local/vast-tools/VASTDB"
+        ls /usr/local/vast-tools/VASTDB/ 2>/dev/null | head -5
+    else
+        ts "WARNING: VASTDB not found at /usr/local/vast-tools/VASTDB!"
+        ts "Checking VASTDB env: \${VASTDB:-not set}"
+    fi
+
+    # ── Background progress monitor ──
+    # Monitors file creation in raw_incl/ and raw_reads/ to track stage progress
+    (
+        while true; do
+            sleep 30
+            now=\$(date '+%H:%M:%S')
+            # Count output files being generated
+            ri_count=\$(find raw_incl -type f 2>/dev/null | wc -l)
+            rr_count=\$(find raw_reads -type f 2>/dev/null | wc -l)
+            # Check what processes are running
+            procs=\$(ps aux 2>/dev/null | grep -E 'perl|Rscript|vast-tools|Add_to|RI_Make|GetPSI|MakeTable' | grep -v grep | awk '{print \$11}' | xargs -r basename -a 2>/dev/null | sort -u | tr '\\n' ', ' || true)
+            mem_used=\$(free -m 2>/dev/null | awk '/Mem:/{print \$3"/"\$2"MB"}' || echo "N/A")
+            echo "[\$now] MONITOR: raw_incl=\$ri_count files, raw_reads=\$rr_count files | mem=\$mem_used | running: \${procs:-none}"
+        done
+    ) &
+    MONITOR_PID=\$!
+    trap "kill \$MONITOR_PID 2>/dev/null || true" EXIT
+
+    # ── Run vast-tools combine ──
+    ts "--- Running vast-tools combine ---"
+    ts "Command: vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose"
+    ts "NOTE: vast-tools buffers verbose output per sub-job (8 sequential jobs with --cores 1)"
+    ts "       Progress monitor above tracks file creation every 30s"
+
+    combine_start=\$(date +%s)
+
+    # Run combine and tee stderr so we see output in real-time
+    # vast-tools combine sends verbose output to stderr
+    vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose 2>&1 | \
+        while IFS= read -r line; do
+            echo "[\$(date '+%H:%M:%S')] \$line"
+        done
+    combine_exit=\${PIPESTATUS[0]}
+
+    combine_end=\$(date +%s)
+    combine_duration=\$(( combine_end - combine_start ))
+    ts "vast-tools combine finished in \${combine_duration}s (exit code: \$combine_exit)"
 
     if [ \$combine_exit -ne 0 ]; then
-        echo "ERROR: vast-tools combine failed with exit code \$combine_exit"
+        ts "ERROR: vast-tools combine failed with exit code \$combine_exit"
+        ts "--- Directory listing ---"
+        ls -la
+        ts "--- raw_incl/ contents ---"
+        ls -la raw_incl/ 2>/dev/null || echo "  (not found)"
+        ts "--- raw_reads/ contents ---"
+        ls -la raw_reads/ 2>/dev/null || echo "  (not found)"
         exit \$combine_exit
     fi
 
-    echo "✓ VAST-tools combine completed successfully"
+    ts "--- Post-combine directory listing ---"
+    ls -la *.tab 2>/dev/null || echo "  No .tab files found!"
+    ls -la raw_incl/ 2>/dev/null | head -5 || true
+    ls -la raw_reads/ 2>/dev/null | head -5 || true
 
-    # Find and rename output file
+    # ── Find and rename output file ──
     output_file=\$(find . -maxdepth 1 -name "INCLUSION_LEVELS_FULL-${params.species}*.tab" -type f | head -n 1)
     if [ -n "\$output_file" ]; then
+        ts "Found output: \$output_file (\$(wc -c < "\$output_file") bytes)"
         cp "\$output_file" "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
         event_count=\$(tail -n +2 "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" | wc -l)
-        echo "✓ Combined table: \$event_count events"
+        sample_count=\$(head -1 "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" | awk -F'\\t' '{print NF}')
+        ts "Combined table: \$event_count events, \$sample_count columns"
     else
-        echo "ERROR: Output file INCLUSION_LEVELS_FULL-${params.species}*.tab not found"
-        ls -la
+        ts "ERROR: Output file INCLUSION_LEVELS_FULL-${params.species}*.tab not found"
+        ts "All files in working directory:"
+        find . -maxdepth 2 -type f | sort
         exit 1
     fi
+
+    ts "=== VAST-tools combine DONE (total: \${combine_duration}s) ==="
     """
 }
 
