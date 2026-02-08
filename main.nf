@@ -642,26 +642,30 @@ process combine_results {
     publishDir "${params.outdir}/inclusion_tables", mode: 'copy', pattern: '*INCLUSION_LEVELS_FULL*.tab'
     container 'andresgordoortiz/vast-tools:latest'
 
-    // HPC-optimized container options
+    // Container options:
+    // DO NOT use --cleanenv or --no-home: vast-tools combine internally calls
+    // R scripts (RI_MakeTablePIR.R) that need a functional R environment.
+    // --cleanenv strips env vars causing R to hang waiting for stdin.
+    // --no-home prevents R from finding user libraries.
     containerOptions {
         if (workflow.containerEngine == 'singularity') {
-            // CRITICAL: Bind the external VASTDB to where the container expects it
-            return "--writable-tmpfs --no-home --cleanenv --bind ${params.vastdb_path}:/usr/local/vast-tools/VASTDB --bind /tmp:/tmp --bind \$PWD:\$PWD"
+            return "--bind ${params.vastdb_path}:/usr/local/vast-tools/VASTDB"
         } else {
-            return '--ulimit stack=unlimited --ulimit memlock=unlimited --shm-size=32g'
+            return ''
         }
     }
 
-    // Retry configuration - more retries for sporadic issues
+    // Retry configuration
     maxRetries 3
     errorStrategy { task.exitStatus in [140, 139, 137, 143, 1] ? 'retry' : 'terminate' }
 
-    // CRITICAL: vast-tools combine MUST use single core (-c 1)
-    // Using multiple cores causes each subprocess to load VASTDB into memory separately,
-    // leading to OOM kills (exit 140). See GitHub issue vastgroup/vast-tools#131
+    // CRITICAL: vast-tools combine MUST use single core (--cores 1)
+    // Multiple cores fork children that each load VASTDB into memory,
+    // causing OOM kills (exit 140). See GitHub issue vastgroup/vast-tools#131
+    // Also: the default in RunDBS_2.pl is already Ncores=1.
     cpus 1
-    memory { 32.GB * Math.pow(2, task.attempt - 1) }  // 32GB -> 64GB -> 128GB -> 256GB on retries
-    time { 4.hours * task.attempt }  // More time for large datasets
+    memory { 16.GB * task.attempt }  // 16GB -> 32GB -> 48GB on retries
+    time { 2.hours * task.attempt }
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -674,92 +678,54 @@ process combine_results {
     script:
     """
     echo "VAST-tools combine attempt ${task.attempt} with ${task.memory} memory"
-    echo "Using VASTDB path: ${vastdb_path}"
-    echo "CRITICAL: Running with single core to avoid memory issues (GitHub issue #131)"
 
-    # CRITICAL: Clean up any leftover temporary directories from previous runs
-    # This is recommended by VAST-tools maintainers to avoid parallelization issues
-    echo "Cleaning up temporary directories..."
-    rm -rf tmp/ raw_incl/ raw_reads/ 2>/dev/null || true
+    # Clean up leftover temp dirs from any prior failed attempts
+    rm -rf raw_incl/ raw_reads/ tmp/ 2>/dev/null || true
 
-    # Create the directory structure VAST-tools expects
+    # Create to_combine/ directory that vast-tools expects inside -o dir
     mkdir -p to_combine
 
-    # Copy files - VAST-tools needs them in to_combine/
-    echo "Collecting VAST-tools output files..."
+    # Collect VAST-tools align output files into to_combine/
     for dir in vast_*; do
-        if [ -d "\$dir" ]; then
-            echo "Processing directory: \$dir"
-
-            # Copy from to_combine subdirectory if it exists
-            if [ -d "\$dir/to_combine" ]; then
-                echo "Copying from \$dir/to_combine/"
-                cp -v "\$dir/to_combine"/* to_combine/ 2>/dev/null || true
-            fi
-
-            # Also check the root of vast_out directories
-            for ext in eej2 exskX IR2 IR.summary_v2.txt micX MULTI3X info; do
-                find "\$dir" -maxdepth 2 -name "*.\$ext" -exec cp -v {} to_combine/ \\; 2>/dev/null || true
-            done
+        [ -d "\$dir" ] || continue
+        echo "Processing: \$dir"
+        if [ -d "\$dir/to_combine" ]; then
+            cp "\$dir/to_combine"/*.{eej2,exskX,IR2,IR.summary_v2.txt,micX,MULTI3X,info} to_combine/ 2>/dev/null || true
         fi
     done
 
-    # Count and verify files
-    file_count=\$(ls to_combine/ 2>/dev/null | wc -l)
+    # Verify files
+    file_count=\$(find to_combine -type f | wc -l)
     echo "Found \$file_count files in to_combine/"
-    echo "Files by type:"
-    for ext in eej2 exskX IR2 micX MULTI3X info; do
-        count=\$(ls to_combine/*.\$ext 2>/dev/null | wc -l || echo 0)
-        echo "  .\$ext: \$count files"
-    done
-
     if [ \$file_count -eq 0 ]; then
         echo "ERROR: No files found to combine!"
-        echo "# No VAST-tools output files found" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
         exit 1
     fi
 
-    # Set environment
-    export VASTDB=${vastdb_path}
-    export TMPDIR=\${PWD}/tmp
-    mkdir -p \$TMPDIR
+    # Run vast-tools combine
+    # - "-o ." means use current dir which contains to_combine/
+    # - No positional args: combine reads to_combine/ from the -o directory automatically
+    # - --cores 1: single-threaded to avoid memory multiplication (default is already 1)
+    echo "Running: vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose"
+    vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose
+    combine_exit=\$?
 
-    # CRITICAL: Run vast-tools combine with the correct species parameter
-    # Use the VASTDB species key (e.g., Mm2), not the genome assembly (mm10)
-    VASTDB_SPECIES=\$(basename ${vastdb_path}/*)
-
-    echo "Running vast-tools combine with species: ${params.species}"
-    echo "VASTDB directory: ${vastdb_path}"
-
-    # Run combine - it should process all event types
-    # CRITICAL: Use -c 1 (single core) to avoid memory issues
-    # Using multiple cores with combine causes each subprocess to load VASTDB
-    # independently, multiplying memory usage and causing OOM kills.
-    # See GitHub issue vastgroup/vast-tools#131
-    vast-tools combine -o . -sp ${params.species} -c 1 --verbose --IR_version 2 to_combine/ 2>&1 | tee combine.log
-
-    combine_exit=\${PIPESTATUS[0]}
-
-    if [ \$combine_exit -eq 0 ]; then
-        echo "✓ VAST-tools combine completed successfully"
-
-        # Find the output file
-        output_file=\$(find . -maxdepth 1 -name "INCLUSION_LEVELS_FULL-${params.species}*.tab" -type f | head -n 1)
-
-        if [ -n "\$output_file" ] && [ -f "\$output_file" ]; then
-            cp "\$output_file" "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-
-            # Count events
-            event_count=\$(tail -n +2 "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" | wc -l)
-            echo "✓ Combined table contains \$event_count events"
-        else
-            echo "WARNING: Combine succeeded but output file not found"
-            echo "# VAST-tools combine completed but output missing" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
-        fi
-    else
+    if [ \$combine_exit -ne 0 ]; then
         echo "ERROR: vast-tools combine failed with exit code \$combine_exit"
-        cat combine.log
-        echo "# VAST-tools combine failed" > "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
+        exit \$combine_exit
+    fi
+
+    echo "✓ VAST-tools combine completed successfully"
+
+    # Find and rename output file
+    output_file=\$(find . -maxdepth 1 -name "INCLUSION_LEVELS_FULL-${params.species}*.tab" -type f | head -n 1)
+    if [ -n "\$output_file" ]; then
+        cp "\$output_file" "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
+        event_count=\$(tail -n +2 "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" | wc -l)
+        echo "✓ Combined table: \$event_count events"
+    else
+        echo "ERROR: Output file INCLUSION_LEVELS_FULL-${params.species}*.tab not found"
+        ls -la
         exit 1
     fi
     """
