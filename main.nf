@@ -560,6 +560,23 @@ process align_reads {
         ls -la vast_out/to_combine/
         echo "File count in to_combine: \$(find vast_out/to_combine/ -type f | wc -l)"
 
+        # Validate eej2 files — bowtie -p N can produce garbled SAM on NFS,
+        # resulting in corrupt eej2 lines with binary/base64 junk.
+        # These cause Add_to_COMBI.pl to loop billions of times during combine.
+        for eej2 in vast_out/to_combine/*.eej2; do
+            [ -f "\$eej2" ] || continue
+            total=\$(wc -l < "\$eej2")
+            valid=\$(grep -cP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" 2>/dev/null || echo 0)
+            bad=\$((total - valid))
+            if [ \$bad -gt 0 ]; then
+                pct=\$(( bad * 100 / total ))
+                echo "WARNING: \$(basename \$eej2) has \$bad/\$total corrupt lines (\${pct}%) — likely bowtie multithreading artifact"
+                echo "  Sanitizing: keeping only valid ENSMUSG lines..."
+                grep -aP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" > "\${eej2}.clean" 2>/dev/null
+                mv "\${eej2}.clean" "\$eej2"
+            fi
+        done
+
         echo "VAST-tools alignment complete for ${sample_id}"
         """
     } else {
@@ -631,6 +648,23 @@ process align_reads {
         ls -la vast_out/to_combine/
         echo "File count in to_combine: \$(find vast_out/to_combine/ -type f | wc -l)"
 
+        # Validate eej2 files — bowtie -p N can produce garbled SAM on NFS,
+        # resulting in corrupt eej2 lines with binary/base64 junk.
+        # These cause Add_to_COMBI.pl to loop billions of times during combine.
+        for eej2 in vast_out/to_combine/*.eej2; do
+            [ -f "\$eej2" ] || continue
+            total=\$(wc -l < "\$eej2")
+            valid=\$(grep -cP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" 2>/dev/null || echo 0)
+            bad=\$((total - valid))
+            if [ \$bad -gt 0 ]; then
+                pct=\$(( bad * 100 / total ))
+                echo "WARNING: \$(basename \$eej2) has \$bad/\$total corrupt lines (\${pct}%) — likely bowtie multithreading artifact"
+                echo "  Sanitizing: keeping only valid ENSMUSG lines..."
+                grep -aP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" > "\${eej2}.clean" 2>/dev/null
+                mv "\${eej2}.clean" "\$eej2"
+            fi
+        done
+
         echo "VAST-tools alignment complete for ${sample_id}"
         """
     }
@@ -662,7 +696,7 @@ process combine_results {
     // Total runtime ≈ COMBI time. Peak memory: ~4GB + ~5GB + ~2GB ≈ 12GB.
     cpus 4
     memory { 16.GB * task.attempt }
-    time { 2.hours * task.attempt }
+    time { 3.hours * task.attempt }
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -749,6 +783,33 @@ process combine_results {
     fi
 
     # ══════════════════════════════════════════════════════════════════════
+    # SANITIZE eej2 FILES — vast-tools align can produce corrupt eej2 files
+    # with binary data / base64 junk mixed into the text. These corrupt lines
+    # create absurd donor/acceptor indices (millions+) which cause the inner
+    # loops in Add_to_COMBI.pl to iterate billions of times → infinite hang.
+    # Valid eej2 lines: ENSMUSG\\d+  \\d+-\\d+  <count>  NA  <positions>
+    # ══════════════════════════════════════════════════════════════════════
+
+    ts "Sanitizing eej2 files (removing corrupt/binary lines)..."
+    corrupt_found=0
+    for eej2_file in to_combine/*.eej2; do
+        [ -f "\$eej2_file" ] || continue
+        total_lines=\$(wc -l < "\$eej2_file")
+        # Keep only lines that start with ENSMUSG followed by digits, tab, digits-digits, tab
+        grep -aP '^ENSMUSG\\d+\\t\\d+-\\d+\\t' "\$eej2_file" > "\${eej2_file}.clean" 2>/dev/null
+        valid_lines=\$(wc -l < "\${eej2_file}.clean")
+        bad_lines=\$((total_lines - valid_lines))
+        if [ \$bad_lines -gt 0 ]; then
+            ts "  WARNING: \$(basename \$eej2_file): removed \$bad_lines/\$total_lines corrupt lines (\$valid_lines valid)"
+            corrupt_found=1
+        fi
+        mv "\${eej2_file}.clean" "\$eej2_file"
+    done
+    if [ \$corrupt_found -eq 0 ]; then
+        ts "  All eej2 files clean — no corrupt lines found"
+    fi
+
+    # ══════════════════════════════════════════════════════════════════════
     # BACKGROUND PROGRESS MONITOR
     # ══════════════════════════════════════════════════════════════════════
 
@@ -770,7 +831,7 @@ process combine_results {
     # ══════════════════════════════════════════════════════════════════════
 
     ts "Running: vast-tools combine -o . -sp ${params.species} --cores 4 --IR_version 2 --verbose"
-    ts "  --cores 4 -> child 0: COMBI (~50min), child 1: EXSK/MULTI/MIC/ANNOT/IR (~30min), child 2: ALT5, child 3: ALT3"
+    ts "  --cores 4 -> COMBI (~30min), EXSK/MULTI/MIC/ANNOT/IR (~30min), ALT5/ALT3 (~5min each)"
 
     combine_start=\$(date +%s)
 
