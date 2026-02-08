@@ -566,13 +566,13 @@ process align_reads {
         for eej2 in vast_out/to_combine/*.eej2; do
             [ -f "\$eej2" ] || continue
             total=\$(wc -l < "\$eej2")
-            valid=\$(grep -cP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" 2>/dev/null || echo 0)
+            valid=\$(grep -cP '^ENSMUSG\\d+\\t\\d+-\\d+\\t' "\$eej2" 2>/dev/null || echo 0)
             bad=\$((total - valid))
             if [ \$bad -gt 0 ]; then
                 pct=\$(( bad * 100 / total ))
                 echo "WARNING: \$(basename \$eej2) has \$bad/\$total corrupt lines (\${pct}%) — likely bowtie multithreading artifact"
                 echo "  Sanitizing: keeping only valid ENSMUSG lines..."
-                grep -aP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" > "\${eej2}.clean" 2>/dev/null
+                grep -aP '^ENSMUSG\\d+\\t\\d+-\\d+\\t' "\$eej2" > "\${eej2}.clean" 2>/dev/null
                 mv "\${eej2}.clean" "\$eej2"
             fi
         done
@@ -654,13 +654,13 @@ process align_reads {
         for eej2 in vast_out/to_combine/*.eej2; do
             [ -f "\$eej2" ] || continue
             total=\$(wc -l < "\$eej2")
-            valid=\$(grep -cP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" 2>/dev/null || echo 0)
+            valid=\$(grep -cP '^ENSMUSG\\d+\\t\\d+-\\d+\\t' "\$eej2" 2>/dev/null || echo 0)
             bad=\$((total - valid))
             if [ \$bad -gt 0 ]; then
                 pct=\$(( bad * 100 / total ))
                 echo "WARNING: \$(basename \$eej2) has \$bad/\$total corrupt lines (\${pct}%) — likely bowtie multithreading artifact"
                 echo "  Sanitizing: keeping only valid ENSMUSG lines..."
-                grep -aP '^ENSMUSG\d+\t\d+-\d+\t' "\$eej2" > "\${eej2}.clean" 2>/dev/null
+                grep -aP '^ENSMUSG\\d+\\t\\d+-\\d+\\t' "\$eej2" > "\${eej2}.clean" 2>/dev/null
                 mv "\${eej2}.clean" "\$eej2"
             fi
         done
