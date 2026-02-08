@@ -642,31 +642,27 @@ process combine_results {
     publishDir "${params.outdir}/inclusion_tables", mode: 'copy', pattern: '*INCLUSION_LEVELS_FULL*.tab'
     container 'andresgordoortiz/vast-tools:latest'
 
-    // Container options:
-    // DO NOT use --cleanenv or --no-home: vast-tools combine internally calls
-    // R scripts (RI_MakeTablePIR.R) that need a functional R environment.
-    // --cleanenv strips env vars causing R to hang waiting for stdin.
-    // --no-home prevents R from finding user libraries.
-    containerOptions {
-        if (workflow.containerEngine == 'singularity') {
-            return "--bind ${params.vastdb_path}:/usr/local/vast-tools/VASTDB"
-        } else {
-            return ''
-        }
-    }
+    // Container options: set in nextflow.config (per-environment).
+    // CRITICAL: Do NOT use --cleanenv or --no-home in containerOptions.
+    //   --cleanenv strips R library paths → R can't find optparse →
+    //   include.R tries install.packages("BiocManager") with no repos →
+    //   R hangs waiting for CRAN mirror selection on stdin → infinite hang.
+    //   --no-home prevents R from finding .Renviron/.Rprofile.
+    //   --writable-tmpfs wastes memory from the cgroup budget.
 
-    // Retry configuration
     maxRetries 3
     errorStrategy { task.exitStatus in [140, 139, 137, 143, 1] ? 'retry' : 'terminate' }
 
-    // vast-tools combine --cores 4 forks 4 children; each runs DIFFERENT scripts
-    // via backticks (separate processes). COMBI runs alone in child 0 (~50 min for
-    // mm10), while EXSK/MULTI/MIC/ANNOT/IR run in parallel on children 1-3.
-    // Peak memory: ~4GB (COMBI) + ~2GB (Perl scripts) + ~5GB (R) ≈ 12GB.
-    // See dopackage in RunDBS_2.pl: [0,1,1,1,1,1,2,3] for --cores 4.
+    // vast-tools combine --cores 4 → RunDBS_2.pl sets Ncores=4 (any value 2-4 maps to 4).
+    // dopackage[4] = [0,1,1,1,1,1,2,3]:
+    //   Child 0: COMBI (~50 min for mm10, 3.7GB hash — the bottleneck)
+    //   Child 1: EXSK + MULTI + MIC + ANNOT + IR (CovKey + R script, ~30 min total)
+    //   Child 2: ALT5 (~5 min)
+    //   Child 3: ALT3 (~5 min)
+    // Total runtime ≈ COMBI time. Peak memory: ~4GB + ~5GB + ~2GB ≈ 12GB.
     cpus 4
-    memory { 16.GB * task.attempt }  // 16GB -> 32GB -> 48GB on retries
-    time { 3.hours * task.attempt }  // COMBI alone takes ~50min for mm10
+    memory { 16.GB * task.attempt }
+    time { 2.hours * task.attempt }
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -687,127 +683,136 @@ process combine_results {
     ts "=== VAST-tools combine START ==="
     ts "Attempt: ${task.attempt} | Memory: ${task.memory} | CPUs: ${task.cpus}"
     ts "Species: ${params.species} | Working dir: \$(pwd)"
-
-    # Show system info for debugging
-    ts "--- System Info ---"
     free -h 2>/dev/null || true
-    df -h . 2>/dev/null | head -2 || true
-    echo ""
 
-    # ── Clean up leftover temp dirs from any prior failed attempts ──
-    rm -rf raw_incl/ raw_reads/ tmp/ 2>/dev/null || true
+    # ══════════════════════════════════════════════════════════════════════
+    # PRE-FLIGHT CHECKS — fail fast instead of hanging for hours
+    # ══════════════════════════════════════════════════════════════════════
 
-    # ── Create to_combine/ directory ──
-    mkdir -p to_combine
-
-    # ── Collect VAST-tools align output files ──
-    ts "--- Collecting align output files ---"
-    for dir in vast_*; do
-        [ -d "\$dir" ] || continue
-        if [ -d "\$dir/to_combine" ]; then
-            sample_files=\$(ls "\$dir/to_combine/" 2>/dev/null | head -1)
-            ts "  \$dir -> \$(ls "\$dir/to_combine/" 2>/dev/null | wc -l) files"
-            cp "\$dir/to_combine"/*.{eej2,exskX,IR2,IR.summary_v2.txt,micX,MULTI3X,info} to_combine/ 2>/dev/null || true
-        else
-            ts "  WARNING: \$dir/to_combine/ not found!"
-        fi
-    done
-
-    # ── Verify collected files ──
-    file_count=\$(find to_combine -type f | wc -l)
-    ts "Total files in to_combine/: \$file_count"
-    ts "File types breakdown:"
-    for ext in eej2 exskX IR2 IR.summary_v2.txt micX MULTI3X info; do
-        count=\$(ls to_combine/*.\$ext 2>/dev/null | wc -l)
-        ts "  *.\$ext: \$count files"
-    done
-
-    if [ \$file_count -eq 0 ]; then
-        ts "ERROR: No files found to combine!"
+    # 1. Verify R environment is functional.
+    #    This is the #1 cause of hangs: if R can't load optparse, include.R
+    #    tries install.packages("BiocManager") which prompts for a CRAN mirror
+    #    on stdin → infinite hang inside Perl backtick call → parent wait() forever.
+    ts "PRE-FLIGHT: Checking R environment..."
+    if ! Rscript --no-save --no-restore -e 'library(optparse); cat("optparse OK\\n")' 2>&1; then
+        ts "FATAL: R cannot load 'optparse'. vast-tools combine will hang."
+        ts "  This usually means --cleanenv stripped R library paths."
+        ts "  Fix: remove --cleanenv from containerOptions in nextflow.config"
         exit 1
     fi
 
-    # ── Verify VASTDB is accessible ──
-    ts "--- VASTDB check ---"
-    if [ -d "/usr/local/vast-tools/VASTDB" ]; then
-        ts "VASTDB found at /usr/local/vast-tools/VASTDB"
-        ls /usr/local/vast-tools/VASTDB/ 2>/dev/null | head -5
-    else
-        ts "WARNING: VASTDB not found at /usr/local/vast-tools/VASTDB!"
-        ts "Checking VASTDB env: \${VASTDB:-not set}"
+    # 2. Verify VASTDB is accessible
+    ts "PRE-FLIGHT: Checking VASTDB..."
+    if [ ! -d "/usr/local/vast-tools/VASTDB" ]; then
+        ts "FATAL: VASTDB not found at /usr/local/vast-tools/VASTDB"
+        exit 1
+    fi
+    ts "  VASTDB OK: \$(ls /usr/local/vast-tools/VASTDB/ 2>/dev/null | head -5 | tr '\\n' ' ')"
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ENVIRONMENT HARDENING
+    # ══════════════════════════════════════════════════════════════════════
+
+    # Prevent OpenBLAS/MKL from spawning threads inside R — each forked
+    # child should use exactly 1 BLAS thread to avoid oversubscription.
+    export OPENBLAS_NUM_THREADS=1
+    export OMP_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+
+    # ══════════════════════════════════════════════════════════════════════
+    # COLLECT INPUT FILES
+    # ══════════════════════════════════════════════════════════════════════
+
+    rm -rf raw_incl/ raw_reads/ tmp/ 2>/dev/null || true
+    mkdir -p to_combine
+
+    ts "Collecting align output files..."
+    for dir in vast_*; do
+        [ -d "\$dir" ] || continue
+        if [ -d "\$dir/to_combine" ]; then
+            ts "  \$dir -> \$(ls "\$dir/to_combine/" 2>/dev/null | wc -l) files"
+            cp "\$dir/to_combine"/*.{eej2,exskX,IR2,IR.summary_v2.txt,micX,MULTI3X,info} to_combine/ 2>/dev/null || true
+        else
+            ts "  WARNING: \$dir/to_combine/ not found"
+        fi
+    done
+
+    file_count=\$(find to_combine -type f | wc -l)
+    ts "Total files in to_combine/: \$file_count"
+    for ext in eej2 exskX IR2 IR.summary_v2.txt micX MULTI3X info; do
+        count=\$(ls to_combine/*.\$ext 2>/dev/null | wc -l)
+        ts "  *.\$ext: \$count"
+    done
+    if [ \$file_count -eq 0 ]; then
+        ts "FATAL: No files found to combine!"
+        exit 1
     fi
 
-    # ── Background progress monitor ──
-    # Monitors file creation in raw_incl/ and raw_reads/ to track stage progress
+    # ══════════════════════════════════════════════════════════════════════
+    # BACKGROUND PROGRESS MONITOR
+    # ══════════════════════════════════════════════════════════════════════
+
     (
         while true; do
             sleep 30
             now=\$(date '+%H:%M:%S')
-            # Count output files being generated
-            ri_count=\$(find raw_incl -type f 2>/dev/null | wc -l)
-            rr_count=\$(find raw_reads -type f 2>/dev/null | wc -l)
-            # Check what processes are running
-            procs=\$(ps aux 2>/dev/null | grep -E 'perl|Rscript|vast-tools|Add_to|RI_Make|GetPSI|MakeTable' | grep -v grep | awk '{print \$11}' | xargs -r basename -a 2>/dev/null | sort -u | tr '\\n' ', ' || true)
-            mem_used=\$(free -m 2>/dev/null | awk '/Mem:/{print \$3"/"\$2"MB"}' || echo "N/A")
-            echo "[\$now] MONITOR: raw_incl=\$ri_count files, raw_reads=\$rr_count files | mem=\$mem_used | running: \${procs:-none}"
+            ri=\$(find raw_incl -type f 2>/dev/null | wc -l)
+            rr=\$(find raw_reads -type f 2>/dev/null | wc -l)
+            procs=\$(ps aux 2>/dev/null | grep -E 'Add_to|RI_Make|GetPSI|MakeTable' | grep -v grep | awk '{printf "%s(%.0fMB) ", \$11, \$6/1024}' || true)
+            echo "[\$now] MONITOR: raw_incl=\$ri raw_reads=\$rr | \${procs:-idle}"
         done
     ) &
     MONITOR_PID=\$!
     trap "kill \$MONITOR_PID 2>/dev/null || true" EXIT
 
-    # ── Run vast-tools combine ──
-    ts "--- Running vast-tools combine ---"
-    ts "Command: vast-tools combine -o . -sp ${params.species} --cores 4 --IR_version 2 --verbose"
-    ts "NOTE: --cores 4 runs COMBI in child 0 while EXSK/MULTI/MIC/ANNOT/IR/ALT run in children 1-3"
-    ts "       COMBI (Add_to_COMBI.pl) is the bottleneck: ~50 min for mm10"
-    ts "       Progress monitor tracks file creation every 30s"
+    # ══════════════════════════════════════════════════════════════════════
+    # RUN VAST-TOOLS COMBINE
+    # ══════════════════════════════════════════════════════════════════════
+
+    ts "Running: vast-tools combine -o . -sp ${params.species} --cores 4 --IR_version 2 --verbose"
+    ts "  --cores 4 -> child 0: COMBI (~50min), child 1: EXSK/MULTI/MIC/ANNOT/IR (~30min), child 2: ALT5, child 3: ALT3"
 
     combine_start=\$(date +%s)
 
-    # Run combine and tee stderr so we see output in real-time
-    # vast-tools combine sends verbose output to stderr
+    # Disable errexit around the pipe so we can capture PIPESTATUS.
+    # Without this, set -e + pipefail kills the script before we reach
+    # the exit code check, making error handling unreachable.
+    set +eo pipefail
     vast-tools combine -o . -sp ${params.species} --cores 4 --IR_version 2 --verbose 2>&1 | \
         while IFS= read -r line; do
             echo "[\$(date '+%H:%M:%S')] \$line"
         done
     combine_exit=\${PIPESTATUS[0]}
+    set -eo pipefail
 
     combine_end=\$(date +%s)
     combine_duration=\$(( combine_end - combine_start ))
     ts "vast-tools combine finished in \${combine_duration}s (exit code: \$combine_exit)"
 
     if [ \$combine_exit -ne 0 ]; then
-        ts "ERROR: vast-tools combine failed with exit code \$combine_exit"
-        ts "--- Directory listing ---"
-        ls -la
-        ts "--- raw_incl/ contents ---"
-        ls -la raw_incl/ 2>/dev/null || echo "  (not found)"
-        ts "--- raw_reads/ contents ---"
-        ls -la raw_reads/ 2>/dev/null || echo "  (not found)"
+        ts "ERROR: vast-tools combine failed (exit \$combine_exit)"
+        ls -la raw_incl/ 2>/dev/null || echo "  raw_incl/ missing"
+        ls -la raw_reads/ 2>/dev/null || echo "  raw_reads/ missing"
         exit \$combine_exit
     fi
 
-    ts "--- Post-combine directory listing ---"
-    ls -la *.tab 2>/dev/null || echo "  No .tab files found!"
-    ls -la raw_incl/ 2>/dev/null | head -5 || true
-    ls -la raw_reads/ 2>/dev/null | head -5 || true
+    # ══════════════════════════════════════════════════════════════════════
+    # COLLECT OUTPUT
+    # ══════════════════════════════════════════════════════════════════════
 
-    # ── Find and rename output file ──
     output_file=\$(find . -maxdepth 1 -name "INCLUSION_LEVELS_FULL-${params.species}*.tab" -type f | head -n 1)
     if [ -n "\$output_file" ]; then
-        ts "Found output: \$output_file (\$(wc -c < "\$output_file") bytes)"
         cp "\$output_file" "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab"
         event_count=\$(tail -n +2 "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" | wc -l)
         sample_count=\$(head -1 "${output_name}_INCLUSION_LEVELS_FULL-${params.species}.tab" | awk -F'\\t' '{print NF}')
-        ts "Combined table: \$event_count events, \$sample_count columns"
+        ts "Output: \$output_file -> \$event_count events, \$sample_count columns"
     else
-        ts "ERROR: Output file INCLUSION_LEVELS_FULL-${params.species}*.tab not found"
-        ts "All files in working directory:"
+        ts "FATAL: INCLUSION_LEVELS_FULL-${params.species}*.tab not found"
         find . -maxdepth 2 -type f | sort
         exit 1
     fi
 
-    ts "=== VAST-tools combine DONE (total: \${combine_duration}s) ==="
+    ts "=== VAST-tools combine DONE (\${combine_duration}s) ==="
     """
 }
 
