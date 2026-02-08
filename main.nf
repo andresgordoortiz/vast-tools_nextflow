@@ -659,13 +659,14 @@ process combine_results {
     maxRetries 3
     errorStrategy { task.exitStatus in [140, 139, 137, 143, 1] ? 'retry' : 'terminate' }
 
-    // CRITICAL: vast-tools combine MUST use single core (--cores 1)
-    // Multiple cores fork children that each load VASTDB into memory,
-    // causing OOM kills (exit 140). See GitHub issue vastgroup/vast-tools#131
-    // Also: the default in RunDBS_2.pl is already Ncores=1.
-    cpus 1
+    // vast-tools combine --cores 4 forks 4 children; each runs DIFFERENT scripts
+    // via backticks (separate processes). COMBI runs alone in child 0 (~50 min for
+    // mm10), while EXSK/MULTI/MIC/ANNOT/IR run in parallel on children 1-3.
+    // Peak memory: ~4GB (COMBI) + ~2GB (Perl scripts) + ~5GB (R) ≈ 12GB.
+    // See dopackage in RunDBS_2.pl: [0,1,1,1,1,1,2,3] for --cores 4.
+    cpus 4
     memory { 16.GB * task.attempt }  // 16GB -> 32GB -> 48GB on retries
-    time { 2.hours * task.attempt }
+    time { 3.hours * task.attempt }  // COMBI alone takes ~50min for mm10
 
     input:
     path vast_out_dirs, stageAs: "vast_*"
@@ -756,15 +757,16 @@ process combine_results {
 
     # ── Run vast-tools combine ──
     ts "--- Running vast-tools combine ---"
-    ts "Command: vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose"
-    ts "NOTE: vast-tools buffers verbose output per sub-job (8 sequential jobs with --cores 1)"
-    ts "       Progress monitor above tracks file creation every 30s"
+    ts "Command: vast-tools combine -o . -sp ${params.species} --cores 4 --IR_version 2 --verbose"
+    ts "NOTE: --cores 4 runs COMBI in child 0 while EXSK/MULTI/MIC/ANNOT/IR/ALT run in children 1-3"
+    ts "       COMBI (Add_to_COMBI.pl) is the bottleneck: ~50 min for mm10"
+    ts "       Progress monitor tracks file creation every 30s"
 
     combine_start=\$(date +%s)
 
     # Run combine and tee stderr so we see output in real-time
     # vast-tools combine sends verbose output to stderr
-    vast-tools combine -o . -sp ${params.species} --cores 1 --IR_version 2 --verbose 2>&1 | \
+    vast-tools combine -o . -sp ${params.species} --cores 4 --IR_version 2 --verbose 2>&1 | \
         while IFS= read -r line; do
             echo "[\$(date '+%H:%M:%S')] \$line"
         done
