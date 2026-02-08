@@ -478,7 +478,7 @@ process align_reads {
     // For 200M+ paired-end reads, expect 10-15 hours
     cpus 8
     memory { 30.GB * task.attempt }
-    time { 25.hours + (3.hours * (task.attempt - 1)) }  // 15h -> 18h -> 21h on retries
+    time { 25.h * task.attempt }  // 25h -> 50h on retry
 
     input:
     tuple val(sample_id), val(sample_type), path(fastq_files), val(group)
